@@ -180,5 +180,6 @@ namespace BattleShip.Client
         
         [JsonProperty("isSystem")]
         public bool IsSystem { get; set; }
+        
     }
 }

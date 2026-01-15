@@ -13,7 +13,7 @@ namespace BattleShip.Client
         event Action<GameEndMessage> OnGameEnded;
         event Action<ShootResultMessage> OnShootResult;
         event Action<ShootMessage> OnOpponentShoot;
-        event Action<ChatMessage> OnChatMessage;
+        event Action<ChatMessage> OnChatMessage;  // Оставляем только это событие
         event Action<GameStateMessage> OnGameStateUpdated;
         event Action<ErrorMessage> OnError;
         
@@ -36,9 +36,16 @@ namespace BattleShip.Client
         Task<bool> ShootAsync(int row, int col);
         
         // Чат
-        Task<bool> SendChatMessageAsync(string text);
+        Task SendChatMessageAsync(string message);
+        // Удаляем дублирующее событие OnChatMessageReceived
         
         // Статистика
         Task<PlayerStats> GetPlayerStatsAsync();
+        
+        public class ChatMessage
+        {
+            public string Sender { get; set; }
+            public string Message { get; set; }
+        }
     }
 }

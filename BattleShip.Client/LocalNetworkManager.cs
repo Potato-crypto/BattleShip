@@ -2,33 +2,33 @@ using System;
 using System.Collections.Generic;
 using System.Threading.Tasks;
 using System.Linq;
-using System.Timers;
 using Newtonsoft.Json;
-using Timer = System.Timers.Timer;
 
 namespace BattleShip.Client
 {
     public class LocalNetworkManager : INetworkService
     {
-        // События
+        // События (из интерфейса)
         public event Action<string> OnMessageReceived;
         public event Action<bool> OnConnectionChanged;
         public event Action<GameStartMessage> OnGameStarted;
         public event Action<GameEndMessage> OnGameEnded;
         public event Action<ShootResultMessage> OnShootResult;
         public event Action<ShootMessage> OnOpponentShoot;
-        public event Action<ChatMessage> OnChatMessage;
+        public event Action<INetworkService.ChatMessage> OnChatMessage;
         public event Action<GameStateMessage> OnGameStateUpdated;
         public event Action<ErrorMessage> OnError;
         
-        // Статусы
+        // Удаляем дублирующее событие OnChatMessageReceived
+        // и заменяем его явной реализацией интерфейса
+        
+        // Свойства (из интерфейса)
         public bool IsConnected { get; private set; }
         public bool IsInGame { get; private set; }
         public string GameId { get; private set; }
         public string PlayerId { get; private set; }
         
         // Имитация сервера
-        private Timer _gameTimer;
         private Random _random = new Random();
         private Dictionary<string, GameSession> _activeGames = new Dictionary<string, GameSession>();
         private PlayerStats _playerStats = new PlayerStats();
@@ -40,8 +40,6 @@ namespace BattleShip.Client
         // Для игры против компьютера
         private bool[,] _computerBoard;
         private List<ShipData> _computerShips;
-        private List<(int row, int col)> _computerShots = new List<(int row, int col)>();
-        private List<(int row, int col)> _availableShots = new List<(int row, int col)>();
         
         public LocalNetworkManager()
         {
@@ -53,16 +51,6 @@ namespace BattleShip.Client
         {
             _computerBoard = new bool[10, 10];
             _computerShips = new List<ShipData>();
-            
-            // Создаем список доступных выстрелов
-            _availableShots.Clear();
-            for (int row = 0; row < 10; row++)
-            {
-                for (int col = 0; col < 10; col++)
-                {
-                    _availableShots.Add((row, col));
-                }
-            }
         }
         
         public async Task ConnectAsync(string playerName)
@@ -157,9 +145,6 @@ namespace BattleShip.Client
                 GameId = gameId;
                 _currentSession = _activeGames[gameId];
                 
-                // В локальной игре против компьютера это не используется
-                // Но оставим для совместимости
-                
                 IsInGame = true;
                 return true;
             }
@@ -212,9 +197,6 @@ namespace BattleShip.Client
                 };
                 
                 OnMessageReceived?.Invoke(JsonConvert.SerializeObject(message));
-                
-                // Уведомляем чат
-                SendSystemMessage("Все корабли расставлены! Игра началась. Ваш ход.");
             }
             
             return true;
@@ -246,7 +228,7 @@ namespace BattleShip.Client
                     Row = row,
                     Col = col,
                     Result = "already_shot",
-                    NextTurn = "player", // Остается ход игрока
+                    NextTurn = "player",
                     RemainingShips = GetRemainingComputerShips()
                 };
                 
@@ -288,7 +270,7 @@ namespace BattleShip.Client
                 Row = row,
                 Col = col,
                 Result = isHit ? "hit" : "miss",
-                NextTurn = isHit ? "player" : "opponent", // При попадании ход остается у игрока
+                NextTurn = isHit ? "player" : "opponent",
                 RemainingShips = GetRemainingComputerShips()
             };
             
@@ -302,19 +284,11 @@ namespace BattleShip.Client
                 {
                     shootResult.Result = "sunk";
                     shootResult.ShipSize = hitShip.Size;
-                    
-                    // Уведомляем в чат
-                    SendSystemMessage($"Вы потопили корабль размером {hitShip.Size}!");
-                }
-                else
-                {
-                    SendSystemMessage("Попадание! Стреляйте еще.");
                 }
             }
             else if (!isHit)
             {
                 _playerStats.Misses++;
-                SendSystemMessage("Промах! Ход переходит к противнику.");
             }
             
             // Отправляем результат игроку
@@ -339,7 +313,7 @@ namespace BattleShip.Client
                 
                 // Компьютер делает ход через 1 секунду
                 await Task.Delay(1000);
-                ComputerShoot();
+                await ComputerShootAsync();
             }
             else
             {
@@ -349,21 +323,49 @@ namespace BattleShip.Client
             return true;
         }
         
-        private void ComputerShoot()
+        public async Task SendChatMessageAsync(string message)
+        {
+            await Task.Delay(100); // Имитация задержки сети
+            
+            var responses = new[]
+            {
+                "Интересный ход!",
+                "Удачи!",
+                "Почти попал!",
+                "Хорошая игра!",
+                "Мне нравится твоя стратегия!",
+                "Продолжай в том же духе!",
+                "Отличный выстрел!",
+                "У тебя хорошо получается!"
+            };
+            
+            var response = responses[_random.Next(responses.Length)];
+            
+            OnChatMessage?.Invoke(new INetworkService.ChatMessage
+            {
+                Sender = "Компьютер",
+                Message = response
+            });
+        }
+
+        public Task<PlayerStats> GetPlayerStatsAsync()
+        {
+            return Task.FromResult(_playerStats);
+        }
+        
+        private async Task ComputerShootAsync()
         {
             if (_currentSession == null || _currentSession.Status != "playing")
                 return;
-            
-            // Умный алгоритм стрельбы компьютера
-            (int row, int col) target;
             
             // Ищем раненый корабль для добивания
             var woundedCells = _currentSession.ComputerShots
                 .Where(s => _currentSession.Player1Ships.Any(ship => 
                     ship.Cells.Any(c => c.Row == s.Row && c.Col == s.Col) &&
-                    !ship.HitCells?.All(h => 
-                        ship.Cells.Any(c => c.Row == h.Row && c.Col == h.Col)) == true))
+                    !(ship.HitCells?.Any(h => h.Row == s.Row && h.Col == s.Col) == true)))
                 .ToList();
+            
+            (int row, int col) target;
             
             if (woundedCells.Count > 0)
             {
@@ -428,21 +430,11 @@ namespace BattleShip.Client
             
             OnOpponentShoot?.Invoke(opponentShoot);
             
-            // Уведомляем в чат
-            string coord = $"{(char)('А' + target.col)}{target.row + 1}";
-            SendSystemMessage($"Противник стреляет в {coord}... " + 
-                (isHit ? "Попадание!" : "Промах!"));
-            
             // Проверяем потопление
             if (isHit && hitShip != null)
             {
                 bool isSunk = hitShip.Cells.All(c => 
                     hitShip.HitCells?.Exists(h => h.Row == c.Row && h.Col == c.Col) == true);
-                
-                if (isSunk)
-                {
-                    SendSystemMessage($"Противник потопил ваш корабль размером {hitShip.Size}!");
-                }
             }
             
             // Проверяем поражение игрока
@@ -460,18 +452,12 @@ namespace BattleShip.Client
             if (!isHit)
             {
                 _currentSession.CurrentTurn = "player";
-                SendSystemMessage("Ваш ход!");
             }
             else
             {
                 // При попадании компьютер стреляет еще раз через 1 секунду
-                Task.Delay(1000).ContinueWith(t => 
-                {
-                    System.Windows.Application.Current.Dispatcher.Invoke(() =>
-                    {
-                        ComputerShoot();
-                    });
-                });
+                await Task.Delay(1000);
+                await ComputerShootAsync();
             }
             
             UpdateGameState();
@@ -626,70 +612,6 @@ namespace BattleShip.Client
     
             OnGameEnded?.Invoke(endMessage);
             UpdateGameState();
-        }
-        
-        private void SendSystemMessage(string text)
-        {
-            var chatMessage = new ChatMessage
-            {
-                Sender = "Система",
-                Text = text,
-                IsSystem = true
-            };
-            
-            OnChatMessage?.Invoke(chatMessage);
-        }
-        
-        public async Task<bool> SendChatMessageAsync(string text)
-        {
-            await Task.Delay(100);
-            
-            var chatMessage = new ChatMessage
-            {
-                Sender = _playerName,
-                Text = text,
-                IsSystem = false
-            };
-            
-            OnChatMessage?.Invoke(chatMessage);
-            
-            // Если игра против компьютера, он может "ответить"
-            if (_currentSession?.GameMode == "computer")
-            {
-                await Task.Delay(1000);
-                
-                var responses = new[]
-                {
-                    "Интересный ход...",
-                    "Я уже почти победил!",
-                    "Удачи тебе!",
-                    "Мои алгоритмы просчитывают твои ходы",
-                    "Хм...",
-                    "Отличная игра!",
-                    "Ты хорошо играешь!",
-                    "Я не сдамся без боя!",
-                    "Еще один корабль и я победил!"
-                };
-                
-                if (_random.Next(0, 3) == 0) // 33% шанс ответа
-                {
-                    var computerResponse = new ChatMessage
-                    {
-                        Sender = "Компьютер",
-                        Text = responses[_random.Next(responses.Length)],
-                        IsSystem = false
-                    };
-                    
-                    OnChatMessage?.Invoke(computerResponse);
-                }
-            }
-            
-            return true;
-        }
-        
-        public Task<PlayerStats> GetPlayerStatsAsync()
-        {
-            return Task.FromResult(_playerStats);
         }
         
         // Вспомогательный класс для игровой сессии

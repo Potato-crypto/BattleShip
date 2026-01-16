@@ -1,5 +1,6 @@
 using System;
 using System.Windows;
+using System.Windows.Input;
 using System.Windows.Media.Animation;
 
 namespace BattleShip.Client
@@ -24,6 +25,21 @@ namespace BattleShip.Client
             this.BeginAnimation(OpacityProperty, fadeIn);
         }
 
+        // Метод для перемещения окна
+        private void Window_MouseLeftButtonDown(object sender, MouseButtonEventArgs e)
+        {
+            if (e.ChangedButton == MouseButton.Left)
+            {
+                this.DragMove();
+            }
+        }
+
+        // Метод для закрытия окна
+        private void CloseButton_Click(object sender, RoutedEventArgs e)
+        {
+            this.Close();
+        }
+
         private void LoginButton_Click(object sender, RoutedEventArgs e)
         {
             // Анимация нажатия кнопки
@@ -36,15 +52,14 @@ namespace BattleShip.Client
 
             LoginButton.BeginAnimation(WidthProperty, scaleAnimation);
             
-            // Открываем окно входа
+            // Открываем окно входа как модальное (блокирует только AuthWindow)
             System.Threading.Tasks.Task.Delay(150).ContinueWith(_ =>
             {
                 Dispatcher.Invoke(() =>
                 {
-                    // Открываем окно входа как модальное
                     LoginWindow loginWindow = new LoginWindow();
-                    loginWindow.Owner = this;
-                    loginWindow.ShowDialog();
+                    loginWindow.Owner = this; // Устанавливаем владельца
+                    loginWindow.ShowDialog(); // Блокирует только AuthWindow
                 });
             });
         }
@@ -58,8 +73,7 @@ namespace BattleShip.Client
             Application.Current.Properties["IsGuest"] = true;
             Application.Current.Properties["Username"] = guestName;
             
-            // Закрываем окно с результатом true
-            this.DialogResult = true;
+            // Закрываем окно
             this.Close();
         }
     }

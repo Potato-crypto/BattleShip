@@ -11,16 +11,13 @@ namespace BattleShip.Client
 
         private void PlayButton_Click(object sender, RoutedEventArgs e)
         {
-            // Открываем окно авторизации как модальное
+            // Открываем окно авторизации как НЕмодальное (не блокирующее)
             AuthWindow authWindow = new AuthWindow();
             
-            // Показываем модальное окно
-            bool? result = authWindow.ShowDialog();
-            
-            // Если пользователь нажал "Играть как гость"
-            if (result == true)
+            // Подписываемся на событие закрытия окна
+            authWindow.Closed += (s, args) =>
             {
-                // Проверяем, установлено ли свойство гостя
+                // Проверяем, был ли выбран гость
                 if (Application.Current.Properties.Contains("IsGuest") && 
                     (bool)Application.Current.Properties["IsGuest"])
                 {
@@ -31,7 +28,10 @@ namespace BattleShip.Client
                     // Закрываем MainWindow
                     this.Close();
                 }
-            }
+            };
+            
+            // Показываем как немодальное окно
+            authWindow.Show();
         }
 
         private void ExitButton_Click(object sender, RoutedEventArgs e)

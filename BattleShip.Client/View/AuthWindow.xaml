@@ -8,7 +8,8 @@
         ResizeMode="NoResize"
         WindowStyle="None"
         Background="Transparent"
-        AllowsTransparency="True">
+        AllowsTransparency="True"
+        MouseLeftButtonDown="Window_MouseLeftButtonDown">
     
     <!-- Эффект тени окна -->
     <Window.Effect>
@@ -27,11 +28,33 @@
         </Border.Background>
         
         <Grid>
+            <!-- Сначала должны идти определения строк -->
             <Grid.RowDefinitions>
                 <RowDefinition Height="*"/>
                 <RowDefinition Height="*"/>
                 <RowDefinition Height="Auto"/>
             </Grid.RowDefinitions>
+            
+            <!-- Кнопка закрытия (крестик) в правом верхнем углу -->
+            <!-- Помещаем в строку 0, но используем отрицательный Margin чтобы была поверх -->
+            <Button x:Name="CloseButton"
+                    Content="✕"
+                    Width="30"
+                    Height="30"
+                    HorizontalAlignment="Right"
+                    VerticalAlignment="Top"
+                    Margin="0,10,10,0"
+                    FontSize="16"
+                    FontWeight="Bold"
+                    Foreground="White"
+                    Background="Transparent"
+                    BorderThickness="0"
+                    Cursor="Hand"
+                    Click="CloseButton_Click">
+                <Button.Effect>
+                    <DropShadowEffect BlurRadius="5" ShadowDepth="1" Color="White" Opacity="0.5"/>
+                </Button.Effect>
+            </Button>
             
             <!-- Иконка -->
             <Viewbox Grid.Row="0" Width="80" Height="80" HorizontalAlignment="Center" VerticalAlignment="Center">

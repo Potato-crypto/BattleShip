@@ -1,4 +1,4 @@
-using BattleShip.Server.Services;
+п»їusing BattleShip.Server.Services;
 
 namespace BattleShip.Server
 {
@@ -8,18 +8,19 @@ namespace BattleShip.Server
         {
             var builder = WebApplication.CreateBuilder(args);
 
-            // Добавляем сервисы
+            // Р”РѕР±Р°РІР»СЏРµРј СЃРµСЂРІРёСЃС‹
             builder.Services.AddControllers();
             builder.Services.AddEndpointsApiExplorer();
             builder.Services.AddSwaggerGen();
             builder.Services.AddSignalR();
 
-            // Регистрируем Firebase сервис
+            // Р РµРіРёСЃС‚СЂРёСЂСѓРµРј РЅР°С€Рё СЃРµСЂРІРёСЃС‹:
             builder.Services.AddSingleton<FirebaseService>();
+            builder.Services.AddScoped<GameService>();  
 
             var app = builder.Build();
 
-            // Конфигурация pipeline
+            // РљРѕРЅС„РёРіСѓСЂР°С†РёСЏ pipeline
             if (app.Environment.IsDevelopment())
             {
                 app.UseSwagger();

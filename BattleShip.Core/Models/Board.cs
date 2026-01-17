@@ -102,6 +102,31 @@ public class Board
         Console.WriteLine($"🎯 Прострелянных клеток: {shotCellsCount}");
     }
 
+    public void InitializeBoard(List<Ship> ships = null)
+    {
+        Console.WriteLine($"🎯 Инициализация доски...");
+
+        // Создаем 100 клеток если их нет
+        EnsureCellsInitialized();
+
+        // Очищаем все клетки
+        foreach (var cell in Cells)
+        {
+            cell.HasShip = false;
+            cell.ShipId = null;
+            cell.WasShot = false;
+            cell.Status = CellStatus.Empty;
+        }
+
+        // Если переданы корабли - размещаем их
+        if (ships != null && ships.Any())
+        {
+            Console.WriteLine($"   Размещаем {ships.Count} кораблей от клиента");
+            Ships = ships;
+            RestoreCellShipReferences();
+        }
+    }
+
     public Cell GetCell(int x, int y)
     {
         return Cells?.FirstOrDefault(c => c.X == x && c.Y == y);

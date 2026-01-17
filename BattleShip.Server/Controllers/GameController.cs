@@ -71,41 +71,46 @@ namespace BattleShip.Server.Controllers
             if (game == null)
                 return NotFound(new { Message = "Игра не найдена" });
 
-            // Проверяем кто это
             bool isPlayer1 = request.PlayerId == game.Player1Id;
             bool isPlayer2 = request.PlayerId == game.Player2Id;
 
             if (!isPlayer1 && !isPlayer2)
                 return Unauthorized(new { Message = "Вы не участник этой игры" });
 
-            // Сохраняем корабли от фронтенда
             var playerBoard = isPlayer1 ? game.Player1Board : game.Player2Board;
+
             if (request.Ships != null && request.Ships.Any())
             {
-                playerBoard.Ships = request.Ships;
-                playerBoard.RestoreCellShipReferences();
+                Console.WriteLine($"💾 Сохраняем {request.Ships.Count} кораблей от игрока {(isPlayer1 ? "1" : "2")}");
 
-                Console.WriteLine($"💾 Игрок {(isPlayer1 ? "1" : "2")} сохранил {request.Ships.Count} кораблей");
+                
+                playerBoard.InitializeBoard(request.Ships);
+
+                
+                int shipCells = playerBoard.Cells.Count(c => c.HasShip);
+                Console.WriteLine($"✅ После инициализации: {shipCells} клеток с кораблями");
+
+                foreach (var ship in playerBoard.Ships)
+                {
+                    Console.WriteLine($"   🚢 {ship.Name}: {ship.CellCoordinates?.Count ?? 0} клеток");
+                }
             }
 
-            // Помечаем игрока как готового
             if (isPlayer1)
                 game.Player1Ready = true;
             else
                 game.Player2Ready = true;
 
-            Console.WriteLine($"✅ Игрок {(isPlayer1 ? "1" : "2")} готов!");
-
-            // Проверяем оба ли игрока готовы
             bool bothReady = game.Player1Ready && game.Player2Ready;
 
             if (bothReady)
             {
-                game.Status = GameStatus.Player1Turn; // Начинаем игру
+                game.Status = GameStatus.Player1Turn;
                 game.CurrentPlayerId = game.Player1Id;
-                Console.WriteLine($"🎮 Оба игрока готовы! Игра {id} начинается!");
+                Console.WriteLine($"🎮 Оба игрока готовы! Игра начинается!");
             }
 
+            
             await _firebaseService.UpdateGameAsync(game);
 
             return Ok(new
@@ -113,10 +118,10 @@ namespace BattleShip.Server.Controllers
                 Success = true,
                 GameStatus = game.Status.ToString(),
                 BothReady = bothReady,
-                ReadyPlayers = (game.Player1Ready ? 1 : 0) + (game.Player2Ready ? 1 : 0),
-                Message = bothReady
-                    ? "Оба игрока готовы! Игра начинается!"
-                    : $"Готов {((game.Player1Ready ? 1 : 0) + (game.Player2Ready ? 1 : 0))}/2 игроков"
+                Player = isPlayer1 ? "Player1" : "Player2",
+                ShipsPlaced = playerBoard.Ships?.Count ?? 0,
+                ShipCells = playerBoard.Cells?.Count(c => c.HasShip) ?? 0,
+                Message = "Корабли расставлены!"
             });
         }
 

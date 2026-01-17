@@ -10,178 +10,114 @@ namespace BattleShip.Server.Services
         {
             Console.WriteLine($"🎯 CheckHit в ({x},{y})");
 
-            if (board == null)
-            {
-                Console.WriteLine("❌ Board is null!");
-                return false;
-            }
+            // Проверка входных данных
+            if (board == null) return false;
+            if (x < 0 || x >= 10 || y < 0 || y >= 10) return false;
 
-            if (x < 0 || x >= 10 || y < 0 || y >= 10)
-                return false;
-
+            // Получаем клетку
             var cell = board.GetCell(x, y);
-            if (cell == null)
-            {
-                Console.WriteLine($"❌ Клетка ({x},{y}) не найдена!");
-                return false;
-            }
+            if (cell == null) return false;
 
-            Console.WriteLine($"🔍 Клетка: HasShip={cell.HasShip}, WasShot={cell.WasShot}, ShipId={cell.ShipId}");
+            Console.WriteLine($"🔍 Клетка: HasShip={cell.HasShip}, ShipId={cell.ShipId}");
 
+            // Если уже стреляли
             if (cell.WasShot)
             {
-                Console.WriteLine("❌ Уже стреляли сюда");
-                return false;
+                Console.WriteLine("⚠️ Уже стреляли сюда");
+                return cell.Status == CellStatus.Hit || cell.Status == CellStatus.Sunk;
             }
 
+            // Помечаем как простреленную
             cell.WasShot = true;
 
-            if (cell.HasShip && !string.IsNullOrEmpty(cell.ShipId))
-            {
-                Console.WriteLine($"🎯 ПОПАДАНИЕ в ({x},{y})!");
-                cell.Status = CellStatus.Hit;
+            // Проверяем попадание ДВУМЯ способами:
+            bool isHit = false;
 
-                // Находим корабль по ShipId
-                var ship = board.Ships?.FirstOrDefault(s => s.Id == cell.ShipId);
+            // По HasShip и ShipId (если связи есть)
+            if (cell.HasShip)
+            {
+                Console.WriteLine($"🎯 ПОПАДАНИЕ (через HasShip) в ({x},{y})!");
+                isHit = true;
+            }
+            // По координатам в кораблях (если связи нет)
+            else if (board.Ships != null)
+            {
+                var coord = $"{x},{y}";
+                var ship = board.Ships.FirstOrDefault(s =>
+                    s.CellCoordinates?.Contains(coord) == true);
 
                 if (ship != null)
                 {
-                    ship.Hits++;
-                    Console.WriteLine($"🚢 Корабль '{ship.Name}': {ship.Hits}/{ship.Size} попаданий");
+                    Console.WriteLine($"🎯 ПОПАДАНИЕ (через координаты корабля) в ({x},{y})!");
+                    isHit = true;
 
-                    if (ship.Hits >= ship.Size)
-                    {
-                        ship.IsSunk = true;
-                        Console.WriteLine($"💥 Корабль '{ship.Name}' ПОТОПЛЕН!");
-                    }
-                }
-                else
-                {
-                    Console.WriteLine($"⚠️ Корабль с ID {cell.ShipId} не найден");
-                }
-
-                return true;
-            }
-
-            cell.Status = CellStatus.Miss;
-            Console.WriteLine($"❌ ПРОМАХ в ({x},{y})");
-            return false;
-        }
-
-        // Случайная расстановка кораблей
-        public void PlaceShipsRandomly(Board board)
-        {
-            Console.WriteLine($"🚢 Начинаем расстановку кораблей...");
-
-            // ✅ Гарантируем что есть 100 клеток
-            board.EnsureCellsInitialized();
-
-            // Очищаем предыдущие корабли
-            board.Ships?.Clear();
-            if (board.Ships == null) board.Ships = new List<Ship>();
-
-            var shipsToPlace = new[]
-            {
-        new Ship { Size = 4, Name = "Линкор" },
-        new Ship { Size = 3, Name = "Крейсер" },
-        new Ship { Size = 3, Name = "Крейсер" },
-        new Ship { Size = 2, Name = "Эсминец" },
-        new Ship { Size = 2, Name = "Эсминец" },
-        new Ship { Size = 2, Name = "Эсминец" },
-        new Ship { Size = 1, Name = "Катер" },
-        new Ship { Size = 1, Name = "Катер" },
-        new Ship { Size = 1, Name = "Катер" },
-        new Ship { Size = 1, Name = "Катер" }
-    };
-
-            var random = new Random();
-            int placedCount = 0;
-
-            foreach (var ship in shipsToPlace)
-            {
-                bool placed = false;
-                int attempts = 0;
-
-                while (!placed && attempts < 100)
-                {
-                    attempts++;
-                    bool isHorizontal = random.Next(0, 2) == 0;
-                    int startX = random.Next(0, isHorizontal ? 10 - ship.Size : 10);
-                    int startY = random.Next(0, isHorizontal ? 10 : 10 - ship.Size);
-
-                    if (CanPlaceShip(board, startX, startY, ship.Size, isHorizontal))
-                    {
-                        PlaceShip(board, ship, startX, startY, isHorizontal);
-                        placed = true;
-                        placedCount++;
-                    }
-                }
-            }
-
-            Console.WriteLine($"🎯 Всего размещено: {placedCount} кораблей");
-            Console.WriteLine($"📊 В списке Ships: {board.Ships?.Count ?? 0} кораблей");
-            Console.WriteLine($"🧮 Клеток на доске: {board.Cells?.Count ?? 0}");
-
-            // Восстанавливаем связи сразу
-            board.RestoreCellShipReferences();
-        }
-
-        private bool CanPlaceShip(Board board, int startX, int startY, int size, bool isHorizontal)
-        {
-            for (int i = 0; i < size; i++)
-            {
-                int x = isHorizontal ? startX + i : startX;
-                int y = isHorizontal ? startY : startY + i;
-
-                if (x >= 10 || y >= 10) return false;
-
-                var cell = board.GetCell(x, y);
-                if (cell == null || cell.HasShip) return false;
-
-                // Проверяем соседние клетки
-                for (int dx = -1; dx <= 1; dx++)
-                {
-                    for (int dy = -1; dy <= 1; dy++)
-                    {
-                        int nx = x + dx;
-                        int ny = y + dy;
-
-                        if (nx >= 0 && nx < 10 && ny >= 0 && ny < 10)
-                        {
-                            var neighborCell = board.GetCell(nx, ny);
-                            if (neighborCell != null && neighborCell.HasShip) return false;
-                        }
-                    }
-                }
-            }
-            return true;
-        }
-
-        private void PlaceShip(Board board, Ship ship, int startX, int startY, bool isHorizontal)
-        {
-            // Очищаем координаты
-            ship.CellCoordinates?.Clear();
-            if (ship.CellCoordinates == null)
-                ship.CellCoordinates = new List<string>();
-
-            for (int i = 0; i < ship.Size; i++)
-            {
-                int x = isHorizontal ? startX + i : startX;
-                int y = isHorizontal ? startY : startY + i;
-
-                var cell = board.GetCell(x, y);
-                if (cell != null)
-                {
+                    // Восстанавливаем связь
                     cell.HasShip = true;
-                    ship.CellCoordinates.Add($"{x},{y}");
-
-                    Console.WriteLine($"   Клетка ({x},{y}) → корабль '{ship.Name}'");
+                    cell.ShipId = ship.Id;
                 }
             }
 
-            board.Ships.Add(ship);
+            // Обновляем статус клетки
+            if (isHit)
+            {
+                cell.Status = CellStatus.Hit;
 
-            Console.WriteLine($"✅ Корабль '{ship.Name}' размещен. ID: {ship.Id}");
+                // Находим корабль для обновления Hits
+                Ship hitShip = null;
+
+                if (!string.IsNullOrEmpty(cell.ShipId))
+                {
+                    hitShip = board.Ships?.FirstOrDefault(s => s.Id == cell.ShipId);
+                }
+
+                if (hitShip == null)
+                {
+                    var coord = $"{x},{y}";
+                    hitShip = board.Ships?.FirstOrDefault(s => s.CellCoordinates?.Contains(coord) == true);
+                }
+
+                if (hitShip != null)
+                {
+                    hitShip.Hits++;
+                    Console.WriteLine($"🚢 Корабль '{hitShip.Name}': {hitShip.Hits}/{hitShip.Size}");
+
+                    if (hitShip.Hits >= hitShip.Size)
+                    {
+                        hitShip.IsSunk = true;
+                        Console.WriteLine($"💥 Корабль '{hitShip.Name}' ПОТОПЛЕН!");
+
+                        // Помечаем все клетки корабля как потопленные
+                        MarkShipCellsAsSunk(board, hitShip);
+                    }
+                }
+            }
+            else
+            {
+                cell.Status = CellStatus.Miss;
+                Console.WriteLine($"❌ ПРОМАХ в ({x},{y})");
+            }
+
+            return isHit;
+        }
+
+        private void MarkShipCellsAsSunk(Board board, Ship ship)
+        {
+            if (ship.CellCoordinates == null) return;
+
+            foreach (var coord in ship.CellCoordinates)
+            {
+                var parts = coord.Split(',');
+                if (parts.Length == 2 &&
+                    int.TryParse(parts[0], out int x) &&
+                    int.TryParse(parts[1], out int y))
+                {
+                    var cell = board.GetCell(x, y);
+                    if (cell != null)
+                    {
+                        cell.Status = CellStatus.Sunk;
+                    }
+                }
+            }
         }
 
         public bool IsGameOver(Board board)

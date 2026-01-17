@@ -61,14 +61,46 @@ namespace BattleShip.Server.Services
 
             try
             {
-                return await _firebaseClient
+                var game = await _firebaseClient
                     .Child("games")
                     .Child(gameId)
                     .OnceSingleAsync<Game>();
+
+                if (game != null)
+                {
+                    Console.WriteLine($"🔄 Игра загружена из Firebase: {game.Id}");
+
+                    
+                    if (game.Player1Board != null)
+                    {
+                        Console.WriteLine($"   Player1Board до восстановления:");
+                        Console.WriteLine($"     Кораблей: {game.Player1Board.Ships?.Count ?? 0}");
+                        Console.WriteLine($"     Клеток с HasShip: {game.Player1Board.Cells?.Count(c => c.HasShip) ?? 0}");
+
+                        game.Player1Board.RestoreCellShipReferences();
+
+                        Console.WriteLine($"   Player1Board после восстановления:");
+                        Console.WriteLine($"     Клеток с HasShip: {game.Player1Board.Cells?.Count(c => c.HasShip) ?? 0}");
+                    }
+
+                    if (game.Player2Board != null)
+                    {
+                        Console.WriteLine($"   Player2Board до восстановления:");
+                        Console.WriteLine($"     Кораблей: {game.Player2Board.Ships?.Count ?? 0}");
+                        Console.WriteLine($"     Клеток с HasShip: {game.Player2Board.Cells?.Count(c => c.HasShip) ?? 0}");
+
+                        game.Player2Board.RestoreCellShipReferences();
+
+                        Console.WriteLine($"   Player2Board после восстановления:");
+                        Console.WriteLine($"     Клеток с HasShip: {game.Player2Board.Cells?.Count(c => c.HasShip) ?? 0}");
+                    }
+                }
+
+                return game;
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"Error loading game: {ex.Message}");
+                Console.WriteLine($"❌ Error loading game: {ex.Message}");
                 return null;
             }
         }
@@ -79,14 +111,48 @@ namespace BattleShip.Server.Services
 
             try
             {
+                Console.WriteLine($"💾 Сохранение игры в Firebase...");
+                Console.WriteLine($"   GameId: {game.Id}");
+                Console.WriteLine($"   Player1 кораблей: {game.Player1Board?.Ships?.Count ?? 0}");
+                Console.WriteLine($"   Player2 кораблей: {game.Player2Board?.Ships?.Count ?? 0}");
+
+                // Проверяем клетки
+                var player1ShipCells = game.Player1Board?.Cells?.Count(c => c.HasShip) ?? 0;
+                var player2ShipCells = game.Player2Board?.Cells?.Count(c => c.HasShip) ?? 0;
+                Console.WriteLine($"   Player1 клеток с кораблями: {player1ShipCells}");
+                Console.WriteLine($"   Player2 клеток с кораблями: {player2ShipCells}");
+
                 await _firebaseClient
                     .Child("games")
                     .Child(game.Id)
                     .PutAsync(game);
+
+                Console.WriteLine($"✅ Игра сохранена в Firebase");
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"Error updating game: {ex.Message}");
+                Console.WriteLine($"❌ Ошибка сохранения игры: {ex.Message}");
+            }
+        }
+
+        public async Task UpdateBoardAsync(string gameId, string playerNumber, Board board)
+        {
+            if (_firebaseClient == null) return;
+
+            try
+            {
+                // Обновляем только доску, а не всю игру
+                await _firebaseClient
+                    .Child("games")
+                    .Child(gameId)
+                    .Child($"player{playerNumber}Board")
+                    .PutAsync(board);
+
+                Console.WriteLine($"✅ Доска игрока {playerNumber} обновлена в Firebase");
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"❌ Ошибка обновления доски: {ex.Message}");
             }
         }
 

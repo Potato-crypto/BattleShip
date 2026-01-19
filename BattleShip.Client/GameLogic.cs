@@ -14,6 +14,8 @@ namespace BattleShip.Client
             public bool IsPlaced { get; set; }
             public bool IsHorizontal { get; set; } = true;
             public (int row, int col)? StartPosition { get; set; }
+            public int Hits { get; set; }
+            public bool IsSunk => Hits >= Size && Size > 0;
         }
 
         private bool[,] _playerBoard;
@@ -42,6 +44,33 @@ namespace BattleShip.Client
             }
             _currentShipIndex = 0;
             _isPlacingShip = false;
+        }
+
+        public Ship GetShipAt(int row, int col)
+        {
+            return PlayerShips.FirstOrDefault(ship =>
+                ship.Cells.Any(c => c.row == row && c.col == col));
+        }
+
+        public void RegisterHit(int row, int col)
+        {
+            var ship = GetShipAt(row, col);
+            if (ship != null)
+            {
+                ship.Hits++;
+            }
+        }
+
+        public bool IsShipSunk(int row, int col)
+        {
+            var ship = GetShipAt(row, col);
+            return ship?.IsSunk ?? false;
+        }
+
+        public List<(int row, int col)> GetShipCells(int row, int col)
+        {
+            var ship = GetShipAt(row, col);
+            return ship?.Cells ?? new List<(int row, int col)>();
         }
 
         public Ship GetCurrentShip()

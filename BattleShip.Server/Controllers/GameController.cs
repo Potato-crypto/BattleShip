@@ -23,32 +23,62 @@ namespace BattleShip.Server.Controllers
         {
             Console.WriteLine($"🔍 Поиск игры для: {request.PlayerName}");
 
-            var game = new Game
+            // 1. Сначала ищем существующую игру в ожидании
+            var waitingGames = await _firebaseService.FindWaitingGamesAsync();
+
+            if (waitingGames.Any())
             {
-                Player1Id = await _firebaseService.CreateTestUser(),
-                Status = GameStatus.WaitingForPlayer,
-                Player1Ready = false,
-                Player2Ready = false
-            };
+                // Нашли ожидающую игру - присоединяемся
+                var existingGame = waitingGames.First();
+                existingGame.Player2Id = await _firebaseService.CreateTestUser();
+                existingGame.Status = GameStatus.PlacingShips;
 
-            // Создаем доски
-            game.Player1Board = new Board();
-            game.Player2Board = new Board();
+                Console.WriteLine($"✅ Нашлась ожидающая игра {existingGame.Id}");
 
-            await _firebaseService.SaveGameAsync(game);
+                await _firebaseService.UpdateGameAsync(existingGame);
 
-            return Ok(new
+                return Ok(new
+                {
+                    Success = true,
+                    GameId = existingGame.Id,
+                    PlayerId = existingGame.Player2Id, // Игрок становится Player2
+                    IsPlayer1 = false, // Это второй игрок
+                    GameStatus = existingGame.Status.ToString(),
+                    Message = "Присоединились к существующей игре!"
+                });
+            }
+            else
             {
-                Success = true,
-                GameId = game.Id,
-                PlayerId = game.Player1Id, // Игрок становится Player1
-                IsPlayer1 = true,
-                GameStatus = game.Status.ToString(),
-                Message = "Игра создана. Ожидаем второго игрока..."
-            });
+                // Не нашли - создаем новую игру
+                var game = new Game
+                {
+                    Player1Id = await _firebaseService.CreateTestUser(),
+                    Status = GameStatus.WaitingForPlayer, // Ожидание второго игрока
+                    Player1Ready = false,
+                    Player2Ready = false
+                };
+
+                // Создаем доски
+                game.Player1Board = new Board();
+                game.Player2Board = new Board();
+
+                await _firebaseService.SaveGameAsync(game);
+
+                Console.WriteLine($"🆕 Создана новая игра {game.Id}");
+
+                return Ok(new
+                {
+                    Success = true,
+                    GameId = game.Id,
+                    PlayerId = game.Player1Id, // Игрок становится Player1
+                    IsPlayer1 = true,
+                    GameStatus = game.Status.ToString(),
+                    Message = "Игра создана. Ожидаем второго игрока..."
+                });
+            }
         }
 
-  
+
 
 
         [HttpGet("test")]
@@ -336,8 +366,6 @@ namespace BattleShip.Server.Controllers
             }
 
             bool isPlayer1Shooting = request.PlayerId == game.Player1Id;
-
-            // Определяем по какому полю стреляем
             Board targetBoard = isPlayer1Shooting ? game.Player2Board : game.Player1Board;
             string targetPlayerNumber = isPlayer1Shooting ? "2" : "1";
 
@@ -354,33 +382,33 @@ namespace BattleShip.Server.Controllers
                 });
             }
 
-            // Проверяем попадание через GameService
-            bool isHit = _gameService.CheckHit(targetBoard, request.X, request.Y);
+            // Используем новый метод с деталями
+            var (isHit, isShipSunk, sunkShip) = _gameService.CheckHitWithDetails(targetBoard, request.X, request.Y);
 
-            Console.WriteLine($"🎯 Результат CheckHit: isHit={isHit}");
+            Console.WriteLine($"🎯 Результат: isHit={isHit}, isShipSunk={isShipSunk}");
 
-            
+            if (sunkShip != null)
+            {
+                Console.WriteLine($"💥 Потоплен корабль: {sunkShip.Name} ({sunkShip.Size} клеток)");
+            }
+
             await _firebaseService.SaveShotAsync(id, request.PlayerId, request.X, request.Y, isHit);
-
-            
             await _firebaseService.UpdateBoardAsync(id, targetPlayerNumber, targetBoard);
 
-            // Проверяем конец игры
             bool isGameOver = _gameService.IsGameOver(targetBoard);
-            Console.WriteLine($"🏁 Конец игры? {isGameOver}");
 
-           
+            // ИСПРАВЛЕНО: Правильная логика смены хода по правилам морского боя
             if (!isGameOver)
             {
                 if (isHit)
                 {
-                    // попадание- тот же игрок продолжает ход
+                    // ПОПАДАНИЕ (даже если потопил корабль) - продолжает ходить
                     Console.WriteLine($"🎯 ПОПАДАНИЕ! Игрок продолжает ход.");
                     // Статус игры НЕ меняем, CurrentPlayerId НЕ меняем
                 }
                 else
                 {
-                    // ❌ ПРОМАХ - меняем ход
+                    // ПРОМАХ - меняем ход
                     game.Status = game.Status == GameStatus.Player1Turn
                         ? GameStatus.Player2Turn
                         : GameStatus.Player1Turn;
@@ -389,12 +417,12 @@ namespace BattleShip.Server.Controllers
                         ? game.Player1Id
                         : game.Player2Id;
 
-                    Console.WriteLine($"🔄 ПРОМАХ! Смена хода. Новый статус: {game.Status}, CurrentPlayer: {game.CurrentPlayerId}");
+                    Console.WriteLine($"🔄 ПРОМАХ! Смена хода. Новый статус: {game.Status}");
                 }
             }
             else
             {
-                // Определяем победителя
+                // КОНЕЦ ИГРЫ
                 game.Status = request.PlayerId == game.Player1Id
                     ? GameStatus.Player1Won
                     : GameStatus.Player2Won;
@@ -404,18 +432,37 @@ namespace BattleShip.Server.Controllers
             await _firebaseService.UpdateGameAsync(game);
             Console.WriteLine($"✅ Игра обновлена в Firebase");
 
+            // ИСПРАВЛЕНО: NextPlayer теперь всегда "player" при попадании, "opponent" при промахе
+            string nextPlayer = "unknown";
+            if (isGameOver)
+            {
+                nextPlayer = "game_over";
+            }
+            else if (isHit)
+            {
+                nextPlayer = "same_player"; // Тот же игрок продолжает
+            }
+            else
+            {
+                nextPlayer = game.Status == GameStatus.Player1Turn ? "player1" : "player2";
+            }
+
+            // Добавляем всю информацию для клиента
             return Ok(new
             {
                 Success = true,
                 IsHit = isHit,
+                IsShipSunk = isShipSunk,
+                ShipSize = sunkShip?.Size ?? 0,
+                ShipName = sunkShip?.Name ?? "",
+                CellStatus = cell?.Status.ToString() ?? "Empty", // "Hit", "Miss", "Sunk"
                 IsGameOver = isGameOver,
                 GameStatus = game.Status.ToString(),
-                CurrentPlayerId = game.CurrentPlayerId, 
-                NextPlayer = !isGameOver ?
-                    (isHit ? "Тот же игрок продолжает (попадание!)" :
-                     (game.Status == GameStatus.Player1Turn ? "Ход Player1" : "Ход Player2"))
-                    : "Игра окончена",
-                Message = isHit ? "Попадание! Ваш ход продолжается." : "Мимо! Ход переходит другому игроку."
+                CurrentPlayerId = game.CurrentPlayerId,
+                NextPlayer = nextPlayer, // ИСПРАВЛЕНО: понятное значение
+                Message = isShipSunk ?
+                    $"Потоплен корабль {sunkShip?.Name}!" :
+                    (isHit ? "Попадание!" : "Мимо!")
             });
         }
 

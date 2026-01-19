@@ -25,7 +25,7 @@ namespace BattleShip.Client
                     GameWindow gameWindow = new GameWindow();
                     gameWindow.Show();
                     
-                    // Закрываем MainWindow
+                    // Закрываем MainWindow 
                     this.Close();
                 }
             };

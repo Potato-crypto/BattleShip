@@ -5,41 +5,32 @@ namespace BattleShip.Server.Services
 {
     public class GameService
     {
-        // Проверка попадания по кораблю
-        public bool CheckHit(Board board, int x, int y)
+        public (bool isHit, bool isShipSunk, Ship sunkShip) CheckHitWithDetails(Board board, int x, int y)
         {
-            Console.WriteLine($"🎯 CheckHit в ({x},{y})");
+            Console.WriteLine($"🎯 CheckHitWithDetails в ({x},{y})");
 
-            // Проверка входных данных
-            if (board == null) return false;
-            if (x < 0 || x >= 10 || y < 0 || y >= 10) return false;
+            if (board == null) return (false, false, null);
+            if (x < 0 || x >= 10 || y < 0 || y >= 10) return (false, false, null);
 
-            // Получаем клетку
             var cell = board.GetCell(x, y);
-            if (cell == null) return false;
+            if (cell == null) return (false, false, null);
 
             Console.WriteLine($"🔍 Клетка: HasShip={cell.HasShip}, ShipId={cell.ShipId}");
 
-            // Если уже стреляли
             if (cell.WasShot)
             {
                 Console.WriteLine("⚠️ Уже стреляли сюда");
-                return cell.Status == CellStatus.Hit || cell.Status == CellStatus.Sunk;
+                return (cell.Status == CellStatus.Hit || cell.Status == CellStatus.Sunk, false, null);
             }
 
-            // Помечаем как простреленную
             cell.WasShot = true;
-
-            // Проверяем попадание ДВУМЯ способами:
             bool isHit = false;
 
-            // По HasShip и ShipId (если связи есть)
             if (cell.HasShip)
             {
                 Console.WriteLine($"🎯 ПОПАДАНИЕ (через HasShip) в ({x},{y})!");
                 isHit = true;
             }
-            // По координатам в кораблях (если связи нет)
             else if (board.Ships != null)
             {
                 var coord = $"{x},{y}";
@@ -50,19 +41,18 @@ namespace BattleShip.Server.Services
                 {
                     Console.WriteLine($"🎯 ПОПАДАНИЕ (через координаты корабля) в ({x},{y})!");
                     isHit = true;
-
-                    // Восстанавливаем связь
                     cell.HasShip = true;
                     cell.ShipId = ship.Id;
                 }
             }
 
-            // Обновляем статус клетки
+            bool isShipSunk = false;
+            Ship sunkShip = null;
+
             if (isHit)
             {
                 cell.Status = CellStatus.Hit;
 
-                // Находим корабль для обновления Hits
                 Ship hitShip = null;
 
                 if (!string.IsNullOrEmpty(cell.ShipId))
@@ -84,10 +74,16 @@ namespace BattleShip.Server.Services
                     if (hitShip.Hits >= hitShip.Size)
                     {
                         hitShip.IsSunk = true;
+                        sunkShip = hitShip;
+                        isShipSunk = true;
+
                         Console.WriteLine($"💥 Корабль '{hitShip.Name}' ПОТОПЛЕН!");
 
-                        // Помечаем все клетки корабля как потопленные
+                        // Помечаем клетки корабля как Sunk
                         MarkShipCellsAsSunk(board, hitShip);
+
+                        // Помечаем клетки вокруг как Miss
+                        MarkCellsAroundSunkShip(board, hitShip);
                     }
                 }
             }
@@ -97,7 +93,7 @@ namespace BattleShip.Server.Services
                 Console.WriteLine($"❌ ПРОМАХ в ({x},{y})");
             }
 
-            return isHit;
+            return (isHit, isShipSunk, sunkShip);
         }
 
         private void MarkShipCellsAsSunk(Board board, Ship ship)
@@ -120,9 +116,64 @@ namespace BattleShip.Server.Services
             }
         }
 
+        // Помечает клетки вокруг потопленного корабля
+        private void MarkCellsAroundSunkShip(Board board, Ship ship)
+        {
+            if (ship.CellCoordinates == null) return;
+
+            Console.WriteLine($"🎯 Помечаем клетки вокруг потопленного корабля '{ship.Name}'");
+
+            foreach (var coord in ship.CellCoordinates)
+            {
+                var parts = coord.Split(',');
+                if (parts.Length == 2 &&
+                    int.TryParse(parts[0], out int x) &&
+                    int.TryParse(parts[1], out int y))
+                {
+                    // Проверяем все 8 направлений вокруг клетки
+                    for (int dx = -1; dx <= 1; dx++)
+                    {
+                        for (int dy = -1; dy <= 1; dy++)
+                        {
+                            int nx = x + dx;
+                            int ny = y + dy;
+
+                            // Пропускаем саму клетку корабля
+                            if (dx == 0 && dy == 0) continue;
+
+                            // Проверяем границы доски
+                            if (nx >= 0 && nx < 10 && ny >= 0 && ny < 10)
+                            {
+                                var neighborCell = board.GetCell(nx, ny);
+                                if (neighborCell != null && !neighborCell.WasShot)
+                                {
+                                    // Помечаем как промах (даже если там есть корабль!)
+                                    neighborCell.WasShot = true;
+                                    neighborCell.Status = CellStatus.Miss;
+                                    Console.WriteLine($"   Клетка вокруг ({nx},{ny}) помечена как Miss");
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        public bool CheckHit(Board board, int x, int y)
+        {
+            var (isHit, _, _) = CheckHitWithDetails(board, x, y);
+            return isHit;
+        }
+
         public bool IsGameOver(Board board)
         {
-            return board.Ships.All(s => s.IsSunk);
+            if (board?.Ships == null) return false;
+
+            bool allSunk = board.Ships.All(s => s.IsSunk);
+
+            Console.WriteLine($"🏁 Проверка конца игры: {board.Ships.Count(s => s.IsSunk)}/{board.Ships.Count} потоплено");
+
+            return allSunk;
         }
     }
 }

@@ -3,6 +3,7 @@ using Firebase.Database;
 using Google.Apis.Auth.OAuth2;
 using BattleShip.Core.Models;
 using Firebase.Database.Query;
+using BattleShip.Core.Enums;
 
 namespace BattleShip.Server.Services
 {
@@ -35,6 +36,39 @@ namespace BattleShip.Server.Services
             {
                 Console.WriteLine($"Firebase error: {ex.Message}");
                 _firebaseClient = null;
+            }
+        }
+
+        public async Task<List<Game>> FindWaitingGamesAsync()
+        {
+            if (_firebaseClient == null) return new List<Game>();
+
+            try
+            {
+                // Получаем все игры
+                var games = await _firebaseClient
+                    .Child("games")
+                    .OnceAsync<Game>();
+
+                // Фильтруем игры в ожидании
+                var waitingGames = new List<Game>();
+
+                foreach (var game in games)
+                {
+                    if (game.Object.Status == GameStatus.WaitingForPlayer &&
+                        string.IsNullOrEmpty(game.Object.Player2Id))
+                    {
+                        waitingGames.Add(game.Object);
+                        Console.WriteLine($"🔍 Найдена ожидающая игра: {game.Key}");
+                    }
+                }
+
+                return waitingGames;
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"❌ Ошибка поиска игр: {ex.Message}");
+                return new List<Game>();
             }
         }
 

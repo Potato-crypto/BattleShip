@@ -75,6 +75,11 @@ namespace BattleShip.Client
         
         [JsonProperty("col")]
         public int Col { get; set; }
+        [JsonProperty("timestamp")]
+        public DateTime Timestamp { get; set; }
+
+        [JsonProperty("isHit")]
+        public bool IsHit { get; set; }
     }
 
     // Результат выстрела
@@ -97,6 +102,9 @@ namespace BattleShip.Client
         
         [JsonProperty("remainingShips")]
         public int RemainingShips { get; set; }
+
+        public string ShipName { get; set; }
+        public string CellStatus { get; set; } 
     }
 
     // Состояние игры
@@ -116,6 +124,9 @@ namespace BattleShip.Client
         
         [JsonProperty("remainingTime")]
         public int RemainingTime { get; set; }
+
+        [JsonProperty("gameStateJson")]
+        public string GameStateJson { get; set; }
     }
 
     // Сообщение о начале игры

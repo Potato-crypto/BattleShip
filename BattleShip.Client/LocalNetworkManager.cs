@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Threading.Tasks;
 using System.Linq;
 using Newtonsoft.Json;
+using System.Diagnostics;
 
 namespace BattleShip.Client
 {
@@ -18,10 +19,11 @@ namespace BattleShip.Client
         public event Action<INetworkService.ChatMessage> OnChatMessage;
         public event Action<GameStateMessage> OnGameStateUpdated;
         public event Action<ErrorMessage> OnError;
-        
+        public event Action<string> OnOpponentDisconnected;
+
         // Удаляем дублирующее событие OnChatMessageReceived
         // и заменяем его явной реализацией интерфейса
-        
+
         // Свойства (из интерфейса)
         public bool IsConnected { get; private set; }
         public bool IsInGame { get; private set; }
@@ -55,7 +57,7 @@ namespace BattleShip.Client
         
         public async Task ConnectAsync(string playerName)
         {
-            await Task.Delay(500); // Имитация задержки сети
+            await Task.Delay(500); 
             
             _playerName = playerName;
             IsConnected = true;

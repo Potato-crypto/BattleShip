@@ -13,10 +13,12 @@ namespace BattleShip.Client
         event Action<GameEndMessage> OnGameEnded;
         event Action<ShootResultMessage> OnShootResult;
         event Action<ShootMessage> OnOpponentShoot;
-        event Action<ChatMessage> OnChatMessage;  // Оставляем только это событие
+        event Action<ChatMessage> OnChatMessage;  
         event Action<GameStateMessage> OnGameStateUpdated;
         event Action<ErrorMessage> OnError;
-        
+        event Action<string> OnOpponentDisconnected;
+
+
         // Статусы
         bool IsConnected { get; }
         bool IsInGame { get; }
@@ -41,11 +43,15 @@ namespace BattleShip.Client
         
         // Статистика
         Task<PlayerStats> GetPlayerStatsAsync();
-        
+
         public class ChatMessage
         {
             public string Sender { get; set; }
             public string Message { get; set; }
+            public bool IsSystem { get; set; }        
+            public bool IsFromOpponent { get; set; }  
+            public DateTime Timestamp { get; set; }   
         }
+
     }
 }

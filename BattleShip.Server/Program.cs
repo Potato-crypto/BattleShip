@@ -1,4 +1,5 @@
-﻿using BattleShip.Server.Services;
+﻿using BattleShip.Server.Hubs;
+using BattleShip.Server.Services;
 
 namespace BattleShip.Server
 {
@@ -16,7 +17,8 @@ namespace BattleShip.Server
 
             // Регистрируем наши сервисы:
             builder.Services.AddSingleton<FirebaseService>();
-            builder.Services.AddScoped<GameService>();  
+            builder.Services.AddScoped<GameService>();
+            builder.Services.AddSignalR();
 
             var app = builder.Build();
 
@@ -30,6 +32,8 @@ namespace BattleShip.Server
             app.UseHttpsRedirection();
             app.UseAuthorization();
             app.MapControllers();
+            app.MapHub<ChatHub>("/chatHub");
+            app.MapHub<GameHub>("/gameHub");
 
             app.Run();
         }

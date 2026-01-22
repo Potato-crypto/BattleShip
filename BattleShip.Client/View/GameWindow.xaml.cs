@@ -100,7 +100,7 @@ namespace BattleShip.Client
             });
         }
 
-// Метод для обновления отображения счетчика:
+        // Метод для обновления отображения счетчика:
         private void UpdateUnreadBadge()
         {
             if (_unreadMessages > 0)
@@ -361,13 +361,61 @@ namespace BattleShip.Client
                     ChatWindowControl.AddSystemMessage($"Ошибка: {error.Message}");
                 });
             };
-            
+
+            _networkService.OnOpponentDisconnected += (message) =>
+            {
+                Dispatcher.Invoke(() =>
+                {
+                    // Показываем в чате
+                    ChatWindowControl.AddSystemMessage($"⚠️ {message}");
+
+                    // Показываем уведомление
+                    ShowSpecialMessage(message, 5000);
+
+                    // Блокируем поле противника
+                    foreach (var cell in _opponentCells.Values)
+                    {
+                        cell.IsEnabled = false;
+                    }
+
+                    // Обновляем статус
+                    GameStatus.Text = "Противник отключился";
+                    // Больше ничего - OnGameEnded вызовется из ServerNetworkManager
+                });
+            };
+
             // Подписываемся на события чата из сетевого сервиса
             _networkService.OnChatMessage += (chatMessage) =>
             {
                 Dispatcher.Invoke(() =>
                 {
-                    ChatWindowControl.AddMessage(chatMessage.Sender, chatMessage.Message);
+                    // Получаем имя игрока
+                    string playerName = Application.Current.Properties.Contains("Username")
+                        ? Application.Current.Properties["Username"].ToString()
+                        : "Вы";
+
+                    // Если это системное сообщение
+                    if (chatMessage.IsSystem)
+                    {
+                        ChatWindowControl.AddSystemMessage(chatMessage.Message);
+                    }
+                    else
+                    {
+                        // Определяем, наше ли это сообщение
+                        bool isOwn = !chatMessage.IsFromOpponent;
+                        string senderDisplayName = isOwn ? "Вы" : chatMessage.Sender;
+
+                        ChatWindowControl.AddMessage(senderDisplayName, chatMessage.Message, isOwn);
+                    }
+
+                    // Если чат закрыт и сообщение не наше - показываем уведомление
+                    if (ChatWindowControl.Visibility != Visibility.Visible &&
+                        !chatMessage.IsSystem &&
+                        chatMessage.IsFromOpponent)
+                    {
+                        // Можно мигнуть кнопкой чата или показать уведомление
+                        ShowSpecialMessage($"Новое сообщение от {chatMessage.Sender}", 2000);
+                    }
                 });
             };
         }
@@ -576,23 +624,35 @@ namespace BattleShip.Client
             }
         }
 
-        private void ChatWindowControl_MessageSent(object sender, string message)
+        private async void ChatWindowControl_MessageSent(object sender, string message)
         {
-            // Получаем имя игрока
-            string playerName = Application.Current.Properties.Contains("Username") 
-                ? Application.Current.Properties["Username"].ToString() 
-                : "Вы";
-            
-            // Добавляем сообщение в локальный чат
-            ChatWindowControl.AddMessage(playerName, message, isOwn: true);
-            
-            // Отправляем сообщение через сетевой сервис
-            if (_networkService.IsInGame)
+            try
             {
-                _ = _networkService.SendChatMessageAsync(message);
+                // Получаем имя игрока
+                string playerName = Application.Current.Properties.Contains("Username")
+                    ? Application.Current.Properties["Username"].ToString()
+                    : "Вы";
+
+                // Сразу показываем свое сообщение в чате
+                ChatWindowControl.AddMessage(playerName, message, isOwn: true);
+
+                // Отправляем через сеть
+                if (_networkService.IsInGame && _networkService.IsConnected)
+                {
+                    await _networkService.SendChatMessageAsync(message);
+                }
+                else
+                {
+                    // Если нет подключения, показываем ошибку
+                    ChatWindowControl.AddSystemMessage("Нет подключения к серверу. Сообщение не отправлено.");
+                }
+            }
+            catch (Exception ex)
+            {
+                ChatWindowControl.AddSystemMessage($"Ошибка отправки: {ex.Message}");
             }
         }
-        
+
         private void ChatWindowControl_Closed(object sender, EventArgs e)
         {
             // Скрываем окно чата

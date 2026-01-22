@@ -6,6 +6,7 @@ using System.Threading.Tasks;
 using System.Linq;
 using Newtonsoft.Json;
 using BattleShip.Core.Models;
+using Microsoft.AspNetCore.SignalR.Client;
 
 namespace BattleShip.Client
 {
@@ -21,6 +22,13 @@ namespace BattleShip.Client
         public event Action<INetworkService.ChatMessage> OnChatMessage;
         public event Action<GameStateMessage> OnGameStateUpdated;
         public event Action<ErrorMessage> OnError;
+        public event Action<string> OnOpponentDisconnected;
+
+        // Все что связано с чатом
+        private HubConnection _chatHubConnection;
+        private HubConnection _gameHubConnection;
+        private bool _isSignalRConnected = false;
+        private const string ServerBaseUrl = "http://localhost:5214";
 
         // Свойства
         public bool IsConnected { get; private set; }
@@ -42,6 +50,158 @@ namespace BattleShip.Client
         {
             _httpClient = new HttpClient { BaseAddress = new Uri(BaseUrl) };
             _httpClient.DefaultRequestHeaders.Add("Accept", "application/json");
+            InitializeSignalR();
+        }
+
+        private void InitializeSignalR()
+        {
+            try
+            {
+                // Создаем подключение к ChatHub
+                _chatHubConnection = new HubConnectionBuilder()
+                    .WithUrl($"{ServerBaseUrl}/chatHub")
+                    .WithAutomaticReconnect(new[]
+                    {
+                    TimeSpan.Zero,
+                    TimeSpan.FromSeconds(2),
+                    TimeSpan.FromSeconds(5),
+                    TimeSpan.FromSeconds(10)
+                    })
+                    .Build();
+
+                // Создаем подключение к GameHub
+                _gameHubConnection = new HubConnectionBuilder()
+                    .WithUrl($"{ServerBaseUrl}/gameHub")
+                    .WithAutomaticReconnect()
+                    .Build();
+
+                // Настраиваем обработчики ChatHub
+                _chatHubConnection.On<string, string>("ReceiveMessage",
+                    (senderId, message) =>
+                    {
+                        Console.WriteLine($"💬 [CHAT] {senderId}: {message}");
+
+                        var senderName = GetPlayerNameById(senderId);
+                        bool isFromOpponent = senderId != PlayerId;
+
+                        OnChatMessage?.Invoke(new INetworkService.ChatMessage
+                        {
+                            Sender = senderName,
+                            Message = message,
+                            IsSystem = false,
+                            IsFromOpponent = isFromOpponent,
+                            Timestamp = DateTime.Now
+                        });
+                    });
+
+                _chatHubConnection.On<string>("ReceiveSystemMessage",
+                    (message) =>
+                    {
+                        Console.WriteLine($"💬 [SYSTEM] {message}");
+
+                        OnChatMessage?.Invoke(new INetworkService.ChatMessage
+                        {
+                            Sender = "Система",
+                            Message = message,
+                            IsSystem = true,    
+                            IsFromOpponent = false,
+                            Timestamp = DateTime.Now
+                        });
+                    });
+
+                // Настраиваем обработчики GameHub
+                _gameHubConnection.On<string>("OpponentDisconnected",
+                    async (message) =>
+                    {
+                        Console.WriteLine($"⚠️ [GAME] Оппонент отключился: {message}");
+
+                        // Вызываем событие отключения
+                        OnOpponentDisconnected?.Invoke(message);
+
+                        // Также вызываем конец игры
+                        OnGameEnded?.Invoke(new GameEndMessage
+                        {
+                            Winner = "player",
+                            Reason = "opponent_disconnected",
+                            Stats = new PlayerStats()
+                        });
+                    });
+
+                _gameHubConnection.On<string>("OpponentReconnected",
+                    (message) =>
+                    {
+                        Console.WriteLine($"✅ [GAME] Оппонент переподключился: {message}");
+
+                        OnChatMessage?.Invoke(new INetworkService.ChatMessage
+                        {
+                            Sender = "Система",
+                            Message = $"✅ {message}",
+                            IsSystem = true,
+                            Timestamp = DateTime.Now
+                        });
+                    });
+
+                // Отслеживаем состояние подключения SignalR
+                _chatHubConnection.Reconnected += connectionId =>
+                {
+                    Console.WriteLine($"✅ SignalR переподключен: {connectionId}");
+                    _isSignalRConnected = true;
+                    return Task.CompletedTask;
+                };
+
+                _chatHubConnection.Reconnecting += error =>
+                {
+                    Console.WriteLine($"🔄 SignalR переподключается: {error?.Message}");
+                    _isSignalRConnected = false;
+                    return Task.CompletedTask;
+                };
+
+                _chatHubConnection.Closed += error =>
+                {
+                    Console.WriteLine($"🔌 SignalR отключен: {error?.Message}");
+                    _isSignalRConnected = false;
+                    return Task.CompletedTask;
+                };
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"❌ Ошибка инициализации SignalR: {ex.Message}");
+            }
+        }
+
+        private string GetPlayerNameById(string playerId)
+        {
+            
+            return playerId == PlayerId ? _playerName : "Соперник";
+        }
+
+        public async Task ReconnectToChatAsync()
+        {
+            if (string.IsNullOrEmpty(GameId) || string.IsNullOrEmpty(PlayerId))
+                return;
+
+            try
+            {
+                if (_chatHubConnection?.State != HubConnectionState.Connected)
+                {
+                    await _chatHubConnection.StartAsync();
+                }
+
+                if (_gameHubConnection?.State != HubConnectionState.Connected)
+                {
+                    await _gameHubConnection.StartAsync();
+                }
+
+                // Повторно присоединяемся к чату игры
+                await _chatHubConnection.InvokeAsync("JoinGameChat", GameId, PlayerId);
+                await _gameHubConnection.InvokeAsync("JoinGame", GameId, PlayerId);
+
+                Console.WriteLine("✅ Переподключились к чату игры");
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"❌ Ошибка переподключения к чату: {ex.Message}");
+            }
         }
 
         public async Task ConnectAsync(string playerName)
@@ -50,11 +210,21 @@ namespace BattleShip.Client
             {
                 _playerName = playerName;
 
-                // Проверяем что сервер доступен
+                // 1. Проверяем HTTP сервер
                 var testResponse = await _httpClient.GetAsync("/api/game/test");
                 if (!testResponse.IsSuccessStatusCode)
                 {
-                    throw new Exception("Сервер недоступен");
+                    throw new Exception("HTTP сервер недоступен");
+                }
+
+                // 2. Подключаемся к SignalR
+                if (_chatHubConnection != null && _gameHubConnection != null)
+                {
+                    await _chatHubConnection.StartAsync();
+                    await _gameHubConnection.StartAsync();
+
+                    _isSignalRConnected = true;
+                    Console.WriteLine("✅ SignalR подключен");
                 }
 
                 IsConnected = true;
@@ -72,11 +242,50 @@ namespace BattleShip.Client
             }
             catch (Exception ex)
             {
-                OnError?.Invoke(new ErrorMessage
+                Console.WriteLine($"⚠️ Частичная ошибка подключения: {ex.Message}");
+
+                // Может быть, SignalR не работает, но HTTP работает
+                // Проверяем, что хотя бы HTTP доступен
+                try
                 {
-                    Code = "CONNECTION_ERROR",
-                    Message = $"Не удалось подключиться: {ex.Message}"
-                });
+                    var test = await _httpClient.GetAsync("/api/game/test");
+                    if (test.IsSuccessStatusCode)
+                    {
+                        IsConnected = true; // Только HTTP доступен
+                        OnConnectionChanged?.Invoke(true);
+                        Console.WriteLine("⚠️ Только HTTP доступен, SignalR не работает");
+                    }
+                }
+                catch
+                {
+                    OnError?.Invoke(new ErrorMessage
+                    {
+                        Code = "CONNECTION_ERROR",
+                        Message = $"Не удалось подключиться: {ex.Message}"
+                    });
+                }
+            }
+        }
+
+        private async Task ConnectToGameChat(string gameId)
+        {
+            if (_chatHubConnection?.State == HubConnectionState.Connected &&
+                _gameHubConnection?.State == HubConnectionState.Connected)
+            {
+                try
+                {
+                    // Присоединяемся к чату игры
+                    await _chatHubConnection.InvokeAsync("JoinGameChat", gameId, PlayerId);
+
+                    // Присоединяемся к уведомлениям игры
+                    await _gameHubConnection.InvokeAsync("JoinGame", gameId, PlayerId);
+
+                    Console.WriteLine($"✅ Присоединились к чату игры {gameId}");
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"⚠️ Не удалось присоединиться к чату: {ex.Message}");
+                }
             }
         }
 
@@ -86,6 +295,17 @@ namespace BattleShip.Client
             IsInGame = false;
             GameId = null;
 
+            // Отключаем SignalR
+            if (_chatHubConnection != null)
+            {
+                await _chatHubConnection.StopAsync();
+            }
+
+            if (_gameHubConnection != null)
+            {
+                await _gameHubConnection.StopAsync();
+            }
+
             // Останавливаем все таймеры
             _waitingTimer?.Dispose();
             _waitingTimer = null;
@@ -94,6 +314,35 @@ namespace BattleShip.Client
             _gameStatePollingTimer = null;
 
             OnConnectionChanged?.Invoke(false);
+        }
+
+        private async Task HandleOpponentDisconnection(string message)
+        {
+            // Отображаем сообщение об отключении
+            OnChatMessage?.Invoke(new INetworkService.ChatMessage
+            {
+                Sender = "Система",
+                Message = $"⚠️ {message}",
+                IsSystem = true,
+                Timestamp = DateTime.Now
+            });
+
+            // Можно также вызвать OnMessageReceived для других уведомлений
+            OnMessageReceived?.Invoke($"OpponentDisconnected: {message}");
+
+            // Автоматическая победа при отключении противника
+            OnGameEnded?.Invoke(new GameEndMessage
+            {
+                Winner = "player",
+                Reason = "opponent_disconnected",
+                Stats = new PlayerStats
+                {
+                    Hits = 0,
+                    Misses = 0,
+                    TotalShots = 0,
+                    Accuracy = 100
+                }
+            });
         }
 
         public async Task<string> CreateGameAsync(string gameMode)
@@ -114,17 +363,17 @@ namespace BattleShip.Client
                 PlayerId = result.PlayerId;
                 IsInGame = true;
 
-                // Если мы Player1 (создатель игры) - ждем второго игрока
+                // ПОДКЛЮЧАЕМСЯ К ЧАТУ
+                await ConnectToGameChat(GameId);
+
                 if (result.IsPlayer1)
                 {
                     ShowStatusMessage("🎮 Ожидание второго игрока...");
-                    StartWaitingForOpponent(); // ← ЗАПУСКАЕМ ОЖИДАНИЕ
+                    StartWaitingForOpponent();
                 }
                 else
                 {
-                    // Мы Player2 (присоединились) - игра начинается
                     ShowStatusMessage("✅ Присоединились к игре!");
-
                     OnGameStarted?.Invoke(new GameStartMessage
                     {
                         GameId = GameId,
@@ -356,13 +605,63 @@ namespace BattleShip.Client
 
         public async Task SendChatMessageAsync(string message)
         {
-            // Ваш сервер пока не поддерживает чат
-            // Можно имитировать или добавить позже
-            OnChatMessage?.Invoke(new INetworkService.ChatMessage
+            if (string.IsNullOrWhiteSpace(message))
+                return;
+
+            try
             {
-                Sender = _playerName,
-                Message = message
-            });
+                // Пытаемся отправить через SignalR
+                if (_chatHubConnection?.State == HubConnectionState.Connected)
+                {
+                    await _chatHubConnection.InvokeAsync("SendMessage", message);
+                    Console.WriteLine($"💬 Сообщение отправлено через SignalR: {message}");
+                }
+                else
+                {
+                    // Fallback: отправляем через HTTP API
+                    await SendChatMessageViaHttpAsync(message);
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"❌ Ошибка отправки сообщения: {ex.Message}");
+
+                // Локальное отображение сообщения (fallback)
+                OnChatMessage?.Invoke(new INetworkService.ChatMessage
+                {
+                    Sender = _playerName,
+                    Message = $"(Не отправлено) {message}",
+                    IsFromOpponent = false,
+                    Timestamp = DateTime.Now
+                });
+            }
+        }
+
+        private async Task SendChatMessageViaHttpAsync(string message)
+        {
+            try
+            {
+                var chatMessage = new
+                {
+                    GameId = GameId,
+                    PlayerId = PlayerId,
+                    PlayerName = _playerName,
+                    Message = message,
+                    Timestamp = DateTime.UtcNow,
+                    IsSystemMessage = false
+                };
+
+                var response = await _httpClient.PostAsJsonAsync($"/api/chat/{GameId}/save", chatMessage);
+
+                if (response.IsSuccessStatusCode)
+                {
+                    Console.WriteLine($"💬 Сообщение отправлено через HTTP: {message}");
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"❌ Ошибка HTTP отправки чата: {ex.Message}");
+            }
         }
 
         public Task<PlayerStats> GetPlayerStatsAsync()

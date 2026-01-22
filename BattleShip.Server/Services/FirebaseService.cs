@@ -190,6 +190,47 @@ namespace BattleShip.Server.Services
             }
         }
 
+        public async Task SaveChatMessageAsync(string gameId, ChatMessage message)
+        {
+            if (_firebaseClient == null) return;
+
+            try
+            {
+                await _firebaseClient
+                    .Child("games")
+                    .Child(gameId)
+                    .Child("chatMessages")
+                    .PostAsync(message);
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Error saving chat message: {ex.Message}");
+            }
+        }
+
+        public async Task<List<ChatMessage>> GetChatHistoryAsync(string gameId)
+        {
+            if (_firebaseClient == null) return new List<ChatMessage>();
+
+            try
+            {
+                var messages = await _firebaseClient
+                    .Child("games")
+                    .Child(gameId)
+                    .Child("chatMessages")
+                    .OnceAsync<ChatMessage>();
+
+                return messages.Select(m => m.Object)
+                    .OrderBy(m => m.Timestamp)
+                    .ToList();
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Error loading chat history: {ex.Message}");
+                return new List<ChatMessage>();
+            }
+        }
+
         public async Task SaveShotAsync(string gameId, string playerId, int x, int y, bool isHit)
         {
             if (_firebaseClient == null) return;

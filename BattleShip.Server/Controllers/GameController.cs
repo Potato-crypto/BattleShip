@@ -15,7 +15,7 @@ namespace BattleShip.Server.Controllers
         public GameController(FirebaseService firebaseService, GameService gameService)
         {
             _firebaseService = firebaseService;
-            _gameService = gameService; 
+            _gameService = gameService;
         }
 
         [HttpPost("find-game")]
@@ -78,9 +78,6 @@ namespace BattleShip.Server.Controllers
             }
         }
 
-
-
-
         [HttpGet("test")]
         public IActionResult Test()
         {
@@ -92,7 +89,6 @@ namespace BattleShip.Server.Controllers
                 Team = "3 разработчика"
             });
         }
-
 
         [HttpPost("{id}/ready")]
         public async Task<IActionResult> PlayerReady(string id, [FromBody] SimpleReadyRequest request)
@@ -113,10 +109,8 @@ namespace BattleShip.Server.Controllers
             {
                 Console.WriteLine($"💾 Сохраняем {request.Ships.Count} кораблей от игрока {(isPlayer1 ? "1" : "2")}");
 
-                
                 playerBoard.InitializeBoard(request.Ships);
 
-                
                 int shipCells = playerBoard.Cells.Count(c => c.HasShip);
                 Console.WriteLine($"✅ После инициализации: {shipCells} клеток с кораблями");
 
@@ -140,7 +134,6 @@ namespace BattleShip.Server.Controllers
                 Console.WriteLine($"🎮 Оба игрока готовы! Игра начинается!");
             }
 
-            
             await _firebaseService.UpdateGameAsync(game);
 
             return Ok(new
@@ -217,8 +210,6 @@ namespace BattleShip.Server.Controllers
             return true;
         }
 
-
-
         [HttpGet("{id}")]
         public async Task<IActionResult> GetGame(string id)
         {
@@ -226,7 +217,6 @@ namespace BattleShip.Server.Controllers
             if (game == null)
                 return NotFound(new { Message = "Игра не найдена" });
 
-            
             return Ok(new
             {
                 game.Id,
@@ -343,7 +333,12 @@ namespace BattleShip.Server.Controllers
             if (game == null)
             {
                 Console.WriteLine($"❌ Игра {id} не найдена");
-                return NotFound(new { Message = "Игра не найдена" });
+                return NotFound(new
+                {
+                    Success = false,
+                    Message = "Игра не найдена",
+                    Code = "GAME_NOT_FOUND"
+                });
             }
 
             Console.WriteLine($"📊 Статус игры: {game.Status}, CurrentPlayer: {game.CurrentPlayerId}");
@@ -353,7 +348,12 @@ namespace BattleShip.Server.Controllers
             if (game.Status != GameStatus.Player1Turn && game.Status != GameStatus.Player2Turn)
             {
                 Console.WriteLine($"❌ Игра не в активной фазе. Статус: {game.Status}");
-                return BadRequest(new { Message = "Игра не в активной фазе" });
+                return BadRequest(new
+                {
+                    Success = false,
+                    Message = "Игра не в активной фазе",
+                    Code = "GAME_NOT_ACTIVE"
+                });
             }
 
             // Проверяем, может ли этот игрок стрелять сейчас
@@ -362,7 +362,12 @@ namespace BattleShip.Server.Controllers
                 (!isPlayer1Turn && request.PlayerId != game.Player2Id))
             {
                 Console.WriteLine($"❌ Не очередь игрока. Ход: {(isPlayer1Turn ? "Player1" : "Player2")}, Стреляет: {request.PlayerId}");
-                return BadRequest(new { Message = "Сейчас не ваш ход" });
+                return BadRequest(new
+                {
+                    Success = false,
+                    Message = "Сейчас не ваш ход",
+                    Code = "NOT_YOUR_TURN"
+                });
             }
 
             bool isPlayer1Shooting = request.PlayerId == game.Player1Id;
@@ -377,7 +382,9 @@ namespace BattleShip.Server.Controllers
                 Console.WriteLine($"❌ Уже стреляли в клетку ({request.X},{request.Y})!");
                 return BadRequest(new
                 {
+                    Success = false,
                     Message = "Вы уже стреляли в эту клетку!",
+                    Code = "ALREADY_SHOT",
                     Status = cell.Status.ToString()
                 });
             }
@@ -517,7 +524,6 @@ namespace BattleShip.Server.Controllers
             });
         }
 
-
         [HttpGet("{id}/player/{playerId}")]
         public async Task<IActionResult> GetPlayerView(string id, string playerId)
         {
@@ -633,5 +639,4 @@ namespace BattleShip.Server.Controllers
         public string PlayerId { get; set; }
         public List<Ship> Ships { get; set; }
     }
-
 }

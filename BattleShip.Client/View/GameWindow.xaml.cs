@@ -1,11 +1,12 @@
+using BattleShip.Client.Services;
 using System;
 using System.Collections.Generic;
-using System.Windows;
-using System.Windows.Controls;
-using System.Windows.Media;
-using System.Windows.Input;
 using System.Linq;
 using System.Threading.Tasks;
+using System.Windows;
+using System.Windows.Controls;
+using System.Windows.Input;
+using System.Windows.Media;
 
 
 namespace BattleShip.Client
@@ -52,13 +53,13 @@ namespace BattleShip.Client
         private INetworkService _networkService;
         private Dictionary<string, Border> _playerCells = new Dictionary<string, Border>();
         private Dictionary<string, Border> _opponentCells = new Dictionary<string, Border>();
-    
+
         // Для отображения выстрелов
         private HashSet<string> _playerShots = new HashSet<string>();
         private HashSet<string> _opponentShots = new HashSet<string>();
         private HashSet<string> _hitsOnPlayer = new HashSet<string>();
         private HashSet<string> _hitsOnOpponent = new HashSet<string>();
-    
+
         // Для задержки особых сообщений
         private bool _showingSpecialMessage = false;
         private System.Windows.Threading.DispatcherTimer _messageTimer;
@@ -72,20 +73,20 @@ namespace BattleShip.Client
             // Инициализация сетевого сервиса 
             _networkService = new ServerNetworkManager();
             SetupNetworkEvents();
-    
+
             _gameLogic = new GameLogic();
             InitializeGameBoards();
-    
+
             // Блокируем кнопки поиска пока корабли не расставлены
             UpdateButtonsState();
-    
+
             // Подключаемся к "серверу" с именем игрока
             ConnectToServer();
-    
+
             // Инициализируем таймер сообщений
             _messageTimer = new System.Windows.Threading.DispatcherTimer();
             _messageTimer.IsEnabled = false;
-            
+
             // Настраиваем обработчики событий чата
             ChatWindowControl.MessageSent += ChatWindowControl_MessageSent;
             ChatWindowControl.Closed += ChatWindowControl_Closed;
@@ -113,13 +114,13 @@ namespace BattleShip.Client
                 UnreadBadge.Visibility = Visibility.Collapsed;
             }
         }
-        
+
         private async void ConnectToServer()
         {
-            string playerName = Application.Current.Properties.Contains("Username") 
-                ? Application.Current.Properties["Username"].ToString() 
+            string playerName = Application.Current.Properties.Contains("Username")
+                ? Application.Current.Properties["Username"].ToString()
                 : "Игрок";
-            
+
             await _networkService.ConnectAsync(playerName);
         }
 
@@ -147,6 +148,12 @@ namespace BattleShip.Client
                 Dispatcher.Invoke(() =>
                 {
                     ConnectionStatus.Text = isConnected ? "Подключено" : "Не подключено";
+
+                    // ДОБАВЛЕНО: При повторном подключении сбрасываем флаг алертов
+                    if (isConnected)
+                    {
+                        AlertService.ResetServerDisconnectFlag();
+                    }
                 });
             };
 
@@ -186,25 +193,25 @@ namespace BattleShip.Client
                 {
                     // Скрываем кнопку чата
                     OpenChatButton.Visibility = Visibility.Collapsed;
-                    
+
                     // Закрываем окно чата, если оно открыто
                     ChatWindowControl.Visibility = Visibility.Collapsed;
-                    
+
                     // Добавляем сообщение в чат о завершении игры
-                    string resultMessage = endMessage.Winner == "player" 
-                        ? "Вы победили! Поздравляем!" 
+                    string resultMessage = endMessage.Winner == "player"
+                        ? "Вы победили! Поздравляем!"
                         : "Вы проиграли. Попробуйте еще раз!";
                     ChatWindowControl.AddSystemMessage(resultMessage);
-                    
+
                     // Показываем модальное окно с результатами
                     GameOverWindow gameOverWindow = new GameOverWindow(
                         endMessage.Winner,
                         _opponentName,
                         endMessage.Stats);
-                
+
                     gameOverWindow.Owner = this;
                     bool? dialogResult = gameOverWindow.ShowDialog();
-                
+
                     // Обрабатываем выбор пользователя
                     if (dialogResult == true)
                     {
@@ -347,18 +354,48 @@ namespace BattleShip.Client
                 {
                     // Не обновляем статус, если показываем специальное сообщение
                     if (_showingSpecialMessage) return;
-                    
+
                     // Обновляем UI в соответствии с состоянием игры
                     UpdateUIForGameState(state);
                 });
             };
-                
+
             _networkService.OnError += (error) =>
             {
                 Dispatcher.Invoke(() =>
                 {
-                    MessageBox.Show(error.Message, "Ошибка", MessageBoxButton.OK, MessageBoxImage.Error);
-                    ChatWindowControl.AddSystemMessage($"Ошибка: {error.Message}");
+                    // Используем новую систему алертов
+                    AlertService.ShowNetworkAlert(error);
+
+                    // Дополнительная логика для критических ошибок
+                    if (error.Code == "SERVER_DISCONNECTED")
+                    {
+                        // Блокируем взаимодействие с игрой
+                        foreach (var cell in _opponentCells.Values)
+                        {
+                            cell.IsEnabled = false;
+                        }
+
+                        foreach (var cell in _playerCells.Values)
+                        {
+                            cell.IsEnabled = false;
+                        }
+
+                        // Меняем статус
+                        GameStatus.Text = "Сервер недоступен. Игра завершена.";
+
+                        // Через 5 секунд автоматически возвращаемся в меню
+                        Task.Delay(5000).ContinueWith(_ =>
+                        {
+                            Dispatcher.Invoke(() =>
+                            {
+                                if (!_isExitingFromGameOver)
+                                {
+                                    ReturnToMainMenu();
+                                }
+                            });
+                        });
+                    }
                 });
             };
 
@@ -658,7 +695,7 @@ namespace BattleShip.Client
             // Скрываем окно чата
             ChatWindowControl.Visibility = Visibility.Collapsed;
         }
-        
+
         private void OpenChatButton_Click(object sender, RoutedEventArgs e)
         {
             // Показываем окно чата
@@ -667,67 +704,67 @@ namespace BattleShip.Client
             ChatWindowControl.MarkAsRead();
             UpdateUnreadBadge();
         }
-        
+
         private void ResetGameForNewRound()
         {
             // Очищаем поле
             _gameLogic.ClearBoard();
-            
+
             // Очищаем историю выстрелов
             _playerShots.Clear();
             _opponentShots.Clear();
             _hitsOnPlayer.Clear();
             _hitsOnOpponent.Clear();
-            
+
             // Обновляем отображение своего поля
             UpdateYourBoard();
-            
+
             // Сбрасываем поле противника (все клетки скрыты)
             foreach (var cell in _opponentCells.Values)
             {
                 cell.Background = new SolidColorBrush(Color.FromRgb(40, 50, 60));
                 cell.IsEnabled = false;
             }
-            
+
             // Разблокируем свое поле для расстановки
             foreach (var cell in _playerCells.Values)
             {
                 cell.IsEnabled = true;
             }
-            
+
             // Скрываем кнопку чата
             OpenChatButton.Visibility = Visibility.Collapsed;
-            
+
             // Закрываем окно чата
             ChatWindowControl.Visibility = Visibility.Collapsed;
-            
+
             // Очищаем чат
             ChatWindowControl.ClearChat();
-            
+
             // Обновляем информацию о кораблях
             UpdateShipsInfo();
             UpdateButtonsState();
-            
+
             // Выходим из текущей игры
             _networkService.LeaveGameAsync();
-            
+
             GameStatus.Text = "Новая игра! Расставьте корабли.";
             _unreadMessages = 0;
             UpdateUnreadBadge();
         }
-        
+
         private void ReturnToMainMenu()
         {
             // Выходим из текущей игры
             _networkService.LeaveGameAsync();
-            
+
             // Сбрасываем состояние
             _gameLogic.ClearBoard();
             _playerShots.Clear();
             _opponentShots.Clear();
             _hitsOnPlayer.Clear();
             _hitsOnOpponent.Clear();
-            
+
             // Закрываем текущее окно и открываем главное меню
             MainWindow mainWindow = new MainWindow();
             mainWindow.Show();
@@ -735,7 +772,7 @@ namespace BattleShip.Client
             _unreadMessages = 0;
             UpdateUnreadBadge();
         }
-        
+
         private void ShowSpecialMessage(string message, int durationMilliseconds)
         {
             // Отменяем предыдущий таймер, если есть
@@ -744,11 +781,11 @@ namespace BattleShip.Client
                 _messageTimer.Stop();
                 _messageTimer = null;
             }
-            
+
             // Показываем сообщение
             _showingSpecialMessage = true;
             GameStatus.Text = message;
-            
+
             // Создаем таймер для возврата к нормальному статусу
             _messageTimer = new System.Windows.Threading.DispatcherTimer();
             _messageTimer.Interval = TimeSpan.FromMilliseconds(durationMilliseconds);
@@ -756,7 +793,7 @@ namespace BattleShip.Client
             {
                 _messageTimer.Stop();
                 _showingSpecialMessage = false;
-                
+
                 // Восстанавливаем нормальный статус
                 if (_networkService.IsInGame)
                 {
@@ -774,20 +811,20 @@ namespace BattleShip.Client
                     GameStatus.Text = _gameLogic.GetCurrentShipInfo();
                 }
             };
-            
+
             _messageTimer.Start();
         }
-        
+
         private string GetCellCoordinate(int row, int col)
         {
             return $"{(char)('А' + col)}{row + 1}";
         }
-                
+
         private void UpdateUIForGameState(GameStateMessage state)
         {
             // Не обновляем, если показываем специальное сообщение
             if (_showingSpecialMessage) return;
-            
+
             switch (state.Status)
             {
                 case "placing":
@@ -839,14 +876,14 @@ namespace BattleShip.Client
                     break;
             }
         }
-        
+
         private void MarkCellsAroundSunkShip(int row, int col, int shipSize, bool isPlayerBoard)
         {
             // Простой алгоритм для пометки клеток вокруг потопленного корабля
             // В реальной игре нужно знать все клетки корабля, но для простоты пометим вокруг точки попадания
-    
+
             var cellsToMark = new List<(int row, int col)>();
-    
+
             // Создаем квадрат 3x3 вокруг точки попадания
             for (int dr = -1; dr <= 1; dr++)
             {
@@ -854,19 +891,19 @@ namespace BattleShip.Client
                 {
                     int checkRow = row + dr;
                     int checkCol = col + dc;
-            
+
                     if (checkRow >= 0 && checkRow < GridSize && checkCol >= 0 && checkCol < GridSize)
                     {
                         cellsToMark.Add((checkRow, checkCol));
                     }
                 }
             }
-    
+
             // Помечаем клетки
             foreach (var (checkRow, checkCol) in cellsToMark)
             {
                 string cellKey = $"{checkRow},{checkCol}";
-        
+
                 if (isPlayerBoard)
                 {
                     if (_playerCells.ContainsKey(cellKey) && !_hitsOnPlayer.Contains(cellKey))
@@ -890,7 +927,7 @@ namespace BattleShip.Client
             InitializeBoard(YourBoardGrid, true);
             InitializeBoard(OpponentBoardGrid, false);
             UpdateShipsInfo();
-    
+
             // Изначально поле противника должно быть полностью скрыто
             foreach (var cell in _opponentCells.Values)
             {
@@ -898,7 +935,7 @@ namespace BattleShip.Client
                 cell.IsEnabled = false;
                 cell.Cursor = Cursors.Arrow; // Курсор "стрелка", а не "рука"
             }
-    
+
             // Свое поле тоже инициализируем
             UpdateYourBoard();
         }
@@ -909,10 +946,10 @@ namespace BattleShip.Client
             boardGrid.Children.Clear();
             boardGrid.RowDefinitions.Clear();
             boardGrid.ColumnDefinitions.Clear();
-            
-            if (isYourBoard) 
+
+            if (isYourBoard)
                 _playerCells.Clear();
-            else 
+            else
                 _opponentCells.Clear();
 
             // Создаем строки и столбцы (10x10 + заголовки)
@@ -965,7 +1002,7 @@ namespace BattleShip.Client
                     Grid.SetRow(cell, row + 1);
                     Grid.SetColumn(cell, col + 1);
                     boardGrid.Children.Add(cell);
-                    
+
                     if (isYourBoard)
                     {
                         _playerCells[$"{row},{col}"] = cell;
@@ -1303,7 +1340,7 @@ namespace BattleShip.Client
                 var coords = kvp.Key.Split(',');
                 int row = int.Parse(coords[0]);
                 int col = int.Parse(coords[1]);
-        
+
                 UpdateOpponentCellColor(kvp.Value, row, col, kvp.Key);
             }
         }
@@ -1312,7 +1349,7 @@ namespace BattleShip.Client
         {
             int placed4 = 0, placed3 = 0, placed2 = 0, placed1 = 0;
             int total4 = 1, total3 = 2, total2 = 3, total1 = 4;
-            
+
             foreach (var ship in _gameLogic.PlayerShips)
             {
                 switch (ship.Size)
@@ -1323,9 +1360,9 @@ namespace BattleShip.Client
                     case 1: if (ship.IsPlaced) placed1++; break;
                 }
             }
-            
-            ShipsInfo.Text = $"Осталось расставить: {total4-placed4}x4, {total3-placed3}x3, {total2-placed2}x2, {total1-placed1}x1";
-            
+
+            ShipsInfo.Text = $"Осталось расставить: {total4 - placed4}x4, {total3 - placed3}x3, {total2 - placed2}x2, {total1 - placed1}x1";
+
             // Показываем информацию о текущем корабле
             GameStatus.Text = _gameLogic.GetCurrentShipInfo();
         }
@@ -1333,10 +1370,10 @@ namespace BattleShip.Client
         private void UpdateButtonsState()
         {
             bool canSearch = _gameLogic.AllShipsPlaced;
-            
+
             PlayWithFriendButton.IsEnabled = canSearch;
             RandomOpponentButton.IsEnabled = canSearch;
-            
+
             if (!canSearch)
             {
                 PlayWithFriendButton.Opacity = 0.5;
@@ -1354,12 +1391,12 @@ namespace BattleShip.Client
         {
             // Расставляем корабли случайным образом
             _gameLogic.RandomlyPlaceShips();
-            
+
             // Обновляем отображение
             UpdateYourBoard();
             UpdateShipsInfo();
             UpdateButtonsState();
-            
+
             ShowSpecialMessage("Корабли расставлены случайным образом!", 2000);
         }
 
@@ -1389,36 +1426,36 @@ namespace BattleShip.Client
 
             ShowSpecialMessage("Поле очищено. Начинайте расстановку заново.", 3000);
         }
-                
+
         private async void StartGameAgainstComputer()
         {
             if (!_gameLogic.AllShipsPlaced)
             {
-                MessageBox.Show("Сначала расставьте все корабли!", "Внимание", 
+                MessageBox.Show("Сначала расставьте все корабли!", "Внимание",
                     MessageBoxButton.OK, MessageBoxImage.Warning);
                 return;
             }
-    
+
             // Очищаем поле противника
             foreach (var cell in _opponentCells.Values)
             {
                 cell.Background = new SolidColorBrush(Color.FromRgb(40, 50, 60));
                 cell.IsEnabled = true; // Разблокируем для стрельбы
             }
-    
+
             // Очищаем историю выстрелов
             _playerShots.Clear();
             _hitsOnOpponent.Clear();
-    
+
             // Создаем игру против компьютера
             string gameId = await _networkService.CreateGameAsync("computer");
-    
+
             if (!string.IsNullOrEmpty(gameId))
             {
                 // Отправляем расстановку кораблей
                 var shipsData = ConvertShipsToNetworkFormat();
                 await _networkService.SendShipsPlacementAsync(shipsData);
-        
+
                 // Блокируем свое поле от изменений
                 foreach (var cell in _playerCells.Values)
                 {
@@ -1426,11 +1463,11 @@ namespace BattleShip.Client
                 }
             }
         }
-        
+
         private List<ShipData> ConvertShipsToNetworkFormat()
         {
             var shipsData = new List<ShipData>();
-            
+
             foreach (var ship in _gameLogic.PlayerShips)
             {
                 if (ship.IsPlaced)
@@ -1441,16 +1478,16 @@ namespace BattleShip.Client
                         IsHorizontal = ship.IsHorizontal,
                         Cells = new List<CellData>()
                     };
-                    
+
                     foreach (var cell in ship.Cells)
                     {
                         shipData.Cells.Add(new CellData { Row = cell.row, Col = cell.col });
                     }
-                    
+
                     shipsData.Add(shipData);
                 }
             }
-            
+
             return shipsData;
         }
 
@@ -1458,14 +1495,14 @@ namespace BattleShip.Client
         {
             if (_networkService.IsInGame)
             {
-                var result = MessageBox.Show("Вы в игре. Выйти из игры и вернуться в меню?", 
+                var result = MessageBox.Show("Вы в игре. Выйти из игры и вернуться в меню?",
                     "Подтверждение",
                     MessageBoxButton.YesNo,
                     MessageBoxImage.Question);
 
                 if (result != MessageBoxResult.Yes)
                     return;
-                
+
                 _networkService.LeaveGameAsync();
             }
 
@@ -1492,14 +1529,14 @@ namespace BattleShip.Client
                 CancelSearch();
                 return;
             }
-            
+
             if (!_gameLogic.AllShipsPlaced)
             {
-                MessageBox.Show("Сначала расставьте все корабли!", "Внимание", 
+                MessageBox.Show("Сначала расставьте все корабли!", "Внимание",
                     MessageBoxButton.OK, MessageBoxImage.Warning);
                 return;
             }
-            
+
             // Начинаем игру против компьютера
             StartSearch();
             await Task.Delay(1500); // Имитация поиска
@@ -1510,15 +1547,15 @@ namespace BattleShip.Client
         private void StartSearch()
         {
             _isSearching = true;
-            
+
             // Скрываем кнопки
             PlayWithFriendButton.Visibility = Visibility.Collapsed;
             RandomOpponentButton.Visibility = Visibility.Collapsed;
             OpenChatButton.Visibility = Visibility.Collapsed;
-            
+
             // Показываем индикатор поиска
             SearchIndicator.Visibility = Visibility.Visible;
-            
+
             // Меняем статус
             GameStatus.Text = "🔍 Поиск случайного соперника...";
             ConnectionStatus.Text = "Поиск...";
@@ -1532,15 +1569,15 @@ namespace BattleShip.Client
         private void CancelSearch()
         {
             _isSearching = false;
-            
+
             // Показываем кнопки
             PlayWithFriendButton.Visibility = Visibility.Visible;
             RandomOpponentButton.Visibility = Visibility.Visible;
             OpenChatButton.Visibility = Visibility.Collapsed;
-            
+
             // Скрываем индикатор поиска
             SearchIndicator.Visibility = Visibility.Collapsed;
-            
+
             // Восстанавливаем статус
             GameStatus.Text = "Подготовка к игре - расставьте корабли на вашем поле";
             ConnectionStatus.Text = _networkService.IsConnected ? "Подключено" : "Не подключено";
@@ -1554,10 +1591,10 @@ namespace BattleShip.Client
                 base.OnClosing(e);
                 return;
             }
-    
+
             if (_networkService.IsInGame)
             {
-                var result = MessageBox.Show("Вы в игре. Выйти из игры?", 
+                var result = MessageBox.Show("Вы в игре. Выйти из игры?",
                     "Подтверждение",
                     MessageBoxButton.YesNo,
                     MessageBoxImage.Question);

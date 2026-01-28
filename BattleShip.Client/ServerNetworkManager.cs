@@ -40,8 +40,11 @@ namespace BattleShip.Client
         private string _playerName;
         private System.Threading.Timer _gameStatePollingTimer;
 
+        // ДОБАВЛЕНО: Флаг для предотвращения повторных алертов об отключении
+        private bool _serverDisconnectAlertShown = false;
+
         private System.Threading.Timer _waitingTimer;
-        private Action<string> _showStatusCallback; 
+        private Action<string> _showStatusCallback;
 
         // Настройки сервера
         private const string BaseUrl = "http://localhost:5214";
@@ -103,7 +106,7 @@ namespace BattleShip.Client
                         {
                             Sender = "Система",
                             Message = message,
-                            IsSystem = true,    
+                            IsSystem = true,
                             IsFromOpponent = false,
                             Timestamp = DateTime.Now
                         });
@@ -171,7 +174,7 @@ namespace BattleShip.Client
 
         private string GetPlayerNameById(string playerId)
         {
-            
+
             return playerId == PlayerId ? _playerName : "Соперник";
         }
 
@@ -294,6 +297,9 @@ namespace BattleShip.Client
             IsConnected = false;
             IsInGame = false;
             GameId = null;
+
+            // Сбрасываем флаг при явном отключении
+            _serverDisconnectAlertShown = false;
 
             // Отключаем SignalR
             if (_chatHubConnection != null)
@@ -439,7 +445,7 @@ namespace BattleShip.Client
 
         private void ShowStatusMessage(string message)
         {
-            
+
             OnMessageReceived?.Invoke($"Status: {message}");
         }
 
@@ -478,9 +484,12 @@ namespace BattleShip.Client
 
         public Task<bool> LeaveGameAsync()
         {
-            
+
             IsInGame = false;
             GameId = null;
+
+            // Сбрасываем флаг при выходе из игры
+            _serverDisconnectAlertShown = false;
 
             _gameStatePollingTimer?.Dispose();
             _gameStatePollingTimer = null;
@@ -537,6 +546,38 @@ namespace BattleShip.Client
         {
             try
             {
+                // ПЕРВОЕ: Получаем текущее состояние игры для проверок
+                var currentState = await GetUpdatedGameStateAsync();
+                if (currentState != null && currentState.CurrentTurn != "player")
+                {
+                    Console.WriteLine($"❌ Игрок пытается стрелять не в свою очередь");
+                    OnError?.Invoke(new ErrorMessage
+                    {
+                        Code = "NOT_YOUR_TURN",
+                        Message = "Сейчас не ваш ход. Дождитесь своей очереди."
+                    });
+                    return false;
+                }
+
+                // ВТОРОЕ: Проверяем, не стреляли ли уже в эту клетку
+                var gameState = await GetFullGameStateAsync();
+                if (gameState?.OpponentBoard?.Cells != null)
+                {
+                    var existingShot = gameState.OpponentBoard.Cells
+                        .FirstOrDefault(c => c.X == row && c.Y == col && c.WasShot);
+
+                    if (existingShot != null)
+                    {
+                        Console.WriteLine($"❌ Игрок пытается стрелять в уже обстрелянную клетку ({row},{col})");
+                        OnError?.Invoke(new ErrorMessage
+                        {
+                            Code = "ALREADY_SHOT",
+                            Message = "Вы уже стреляли в эту клетку. Выберите другую цель."
+                        });
+                        return false;
+                    }
+                }
+
                 var request = new ServerFireRequest
                 {
                     PlayerId = PlayerId,
@@ -551,7 +592,25 @@ namespace BattleShip.Client
                 if (!response.IsSuccessStatusCode)
                 {
                     Console.WriteLine($"❌ Ошибка выстрела: {response.StatusCode}");
-                    throw new Exception($"Ошибка выстрела: {response.StatusCode}");
+
+                    // Проверяем специфичные коды ошибок от сервера
+                    var errorJson = await response.Content.ReadAsStringAsync();
+                    var errorResponse = JsonConvert.DeserializeObject<ServerErrorResponse>(errorJson);
+
+                    if (errorResponse?.Code == "NOT_YOUR_TURN")
+                    {
+                        OnError?.Invoke(new ErrorMessage
+                        {
+                            Code = "NOT_YOUR_TURN",
+                            Message = "Сейчас не ваш ход. Дождитесь своей очереди."
+                        });
+                    }
+                    else
+                    {
+                        throw new Exception($"Ошибка выстрела: {response.StatusCode}");
+                    }
+
+                    return false;
                 }
 
                 // Читаем как JSON строку
@@ -590,6 +649,36 @@ namespace BattleShip.Client
 
                 Console.WriteLine($"=== ShootAsync завершен успешно ===");
                 return true;
+            }
+            catch (HttpRequestException ex)
+            {
+                Console.WriteLine($"❌ Ошибка соединения с сервером: {ex.Message}");
+
+                // Показываем алерт только один раз
+                if (!_serverDisconnectAlertShown)
+                {
+                    _serverDisconnectAlertShown = true;
+
+                    OnError?.Invoke(new ErrorMessage
+                    {
+                        Code = "SERVER_DISCONNECTED",
+                        Message = "Сервер недоступен. Игра будет завершена."
+                    });
+
+                    // Останавливаем таймер опроса состояния
+                    _gameStatePollingTimer?.Dispose();
+                    _gameStatePollingTimer = null;
+
+                    // Вызываем событие завершения игры
+                    OnGameEnded?.Invoke(new GameEndMessage
+                    {
+                        Winner = "none",
+                        Reason = "server_disconnected",
+                        Stats = new PlayerStats()
+                    });
+                }
+
+                return false;
             }
             catch (Exception ex)
             {
@@ -827,6 +916,34 @@ namespace BattleShip.Client
 
                 Console.WriteLine($"=== PollGameStateAsync завершен ===");
             }
+            catch (HttpRequestException ex)
+            {
+                Console.WriteLine($"❌ Ошибка соединения с сервером в PollGameStateAsync: {ex.Message}");
+
+                // Показываем алерт только один раз
+                if (!_serverDisconnectAlertShown)
+                {
+                    _serverDisconnectAlertShown = true;
+
+                    OnError?.Invoke(new ErrorMessage
+                    {
+                        Code = "SERVER_DISCONNECTED",
+                        Message = "Сервер недоступен. Игра будет завершена."
+                    });
+
+                    // Останавливаем таймер опроса состояния
+                    _gameStatePollingTimer?.Dispose();
+                    _gameStatePollingTimer = null;
+
+                    // Вызываем событие завершения игры
+                    OnGameEnded?.Invoke(new GameEndMessage
+                    {
+                        Winner = "none",
+                        Reason = "server_disconnected",
+                        Stats = new PlayerStats()
+                    });
+                }
+            }
             catch (Exception ex)
             {
                 Console.WriteLine($"❌ Ошибка опроса состояния: {ex.Message}");
@@ -880,6 +997,27 @@ namespace BattleShip.Client
             catch (Exception ex)
             {
                 Console.WriteLine($"Ошибка получения состояния: {ex.Message}");
+                return null;
+            }
+        }
+
+        // ДОБАВЛЕНО: Вспомогательный метод для получения полного состояния
+        private async Task<ServerPlayerViewResponse> GetFullGameStateAsync()
+        {
+            if (string.IsNullOrEmpty(GameId) || string.IsNullOrEmpty(PlayerId))
+                return null;
+
+            try
+            {
+                var response = await _httpClient.GetAsync($"/api/game/{GameId}/player/{PlayerId}");
+                if (!response.IsSuccessStatusCode)
+                    return null;
+
+                var json = await response.Content.ReadAsStringAsync();
+                return JsonConvert.DeserializeObject<ServerPlayerViewResponse>(json);
+            }
+            catch
+            {
                 return null;
             }
         }
@@ -941,7 +1079,15 @@ namespace BattleShip.Client
             public bool IsShipSunk { get; set; }
             public int ShipSize { get; set; }
             public string ShipName { get; set; }
-            public string CellStatus { get; set; } 
+            public string CellStatus { get; set; }
+        }
+
+        // ДОБАВЛЕНО: Класс для обработки ошибок от сервера
+        private class ServerErrorResponse
+        {
+            public bool Success { get; set; }
+            public string Message { get; set; }
+            public string Code { get; set; }
         }
 
         private class ServerPlayerViewResponse

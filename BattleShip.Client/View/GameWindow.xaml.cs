@@ -65,9 +65,6 @@ namespace BattleShip.Client
         private System.Windows.Threading.DispatcherTimer _messageTimer;
         private string _opponentName = "Компьютер";
         private bool _isExitingFromGameOver = false;
-        
-        // НОВОЕ: флаг первого выстрела в игре
-        private bool _firstShotMade = false;
 
         public GameWindow()
         {
@@ -184,20 +181,14 @@ namespace BattleShip.Client
                     // Очищаем историю выстрелов
                     _playerShots.Clear();
                     _hitsOnOpponent.Clear();
-                    
-                    // Сбрасываем флаг первого выстрела - игра только началась
-                    _firstShotMade = false;
 
                     // Разблокируем поле противника
                     EnableOpponentBoard(true);
 
-                    // Скрываем индикатор поиска
-                    _isSearching = false;
+                    // В игре скрываем кнопки поиска
+                    PlayWithFriendButton.Visibility = Visibility.Collapsed;
+                    RandomOpponentButton.Visibility = Visibility.Collapsed;
                     SearchIndicator.Visibility = Visibility.Collapsed;
-                    CancelSearchButton.Visibility = Visibility.Collapsed;
-
-                    // Обновляем состояние кнопок
-                    UpdateAllButtonsState();
                 });
             };
 
@@ -258,12 +249,6 @@ namespace BattleShip.Client
 
                     // Добавляем выстрел в историю
                     _playerShots.Add(cellKey);
-                    
-                    // Отмечаем, что сделан первый выстрел
-                    _firstShotMade = true;
-                    
-                    // Обновляем кнопки после первого выстрела
-                    UpdateAllButtonsState();
 
                     if (_opponentCells.ContainsKey(cellKey))
                     {
@@ -344,12 +329,6 @@ namespace BattleShip.Client
 
                     // Просто добавляем выстрел в историю
                     _opponentShots.Add(cellKey);
-                    
-                    // Отмечаем, что сделан первый выстрел (противником)
-                    _firstShotMade = true;
-                    
-                    // Обновляем кнопки после первого выстрела
-                    UpdateAllButtonsState();
 
                     // Проверяем попадание
                     bool isHit = _gameLogic.GetPlayerShipCells()
@@ -409,6 +388,11 @@ namespace BattleShip.Client
 
                         // Меняем статус
                         GameStatus.Text = "Сервер недоступен. Игра завершена.";
+
+                        // Показываем кнопки поиска снова
+                        PlayWithFriendButton.Visibility = Visibility.Visible;
+                        RandomOpponentButton.Visibility = Visibility.Visible;
+                        SearchIndicator.Visibility = Visibility.Collapsed;
 
                         // Через 5 секунд автоматически возвращаемся в меню
                         Task.Delay(5000).ContinueWith(_ =>
@@ -741,9 +725,6 @@ namespace BattleShip.Client
             _opponentShots.Clear();
             _hitsOnPlayer.Clear();
             _hitsOnOpponent.Clear();
-            
-            // Сбрасываем флаг первого выстрела
-            _firstShotMade = false;
 
             // Обновляем отображение своего поля
             UpdateYourBoard();
@@ -772,7 +753,7 @@ namespace BattleShip.Client
 
             // Обновляем информацию о кораблях
             UpdateShipsInfo();
-            UpdateAllButtonsState(); // Используем обновленный метод
+            UpdateButtonsState();
 
             // Выходим из текущей игры
             _networkService.LeaveGameAsync();
@@ -780,6 +761,11 @@ namespace BattleShip.Client
             GameStatus.Text = "Новая игра! Расставьте корабли.";
             _unreadMessages = 0;
             UpdateUnreadBadge();
+
+            // Показываем кнопки поиска
+            PlayWithFriendButton.Visibility = Visibility.Visible;
+            RandomOpponentButton.Visibility = Visibility.Visible;
+            SearchIndicator.Visibility = Visibility.Collapsed;
         }
 
         private void ReturnToMainMenu()
@@ -793,9 +779,6 @@ namespace BattleShip.Client
             _opponentShots.Clear();
             _hitsOnPlayer.Clear();
             _hitsOnOpponent.Clear();
-            
-            // Сбрасываем флаг первого выстрела
-            _firstShotMade = false;
 
             // Закрываем текущее окно и открываем главное меню
             MainWindow mainWindow = new MainWindow();
@@ -854,7 +837,7 @@ namespace BattleShip.Client
 
         private void UpdateUIForGameState(GameStateMessage state)
         {
-            // Не обновляем статус, если показываем специальное сообщение
+            // Не обновляем, если показываем специальное сообщение
             if (_showingSpecialMessage) return;
 
             switch (state.Status)
@@ -1253,7 +1236,7 @@ namespace BattleShip.Client
                     // Обновляем отображение
                     UpdateYourBoard();
                     UpdateShipsInfo();
-                    UpdateAllButtonsState(); // Используем обновленный метод
+                    UpdateButtonsState();
 
                     // Обновляем статус, если не показываем специальное сообщение
                     if (!_showingSpecialMessage)
@@ -1279,7 +1262,7 @@ namespace BattleShip.Client
                 {
                     UpdateYourBoard();
                     UpdateShipsInfo();
-                    UpdateAllButtonsState(); // Используем обновленный метод
+                    UpdateButtonsState();
 
                     if (!_showingSpecialMessage)
                     {
@@ -1307,7 +1290,7 @@ namespace BattleShip.Client
                     // Обновляем отображение
                     UpdateYourBoard();
                     UpdateShipsInfo();
-                    UpdateAllButtonsState(); // Используем обновленный метод
+                    UpdateButtonsState();
                 }
                 else
                 {
@@ -1317,7 +1300,7 @@ namespace BattleShip.Client
                     // Обновляем отображение
                     UpdateYourBoard();
                     UpdateShipsInfo();
-                    UpdateAllButtonsState(); // Используем обновленный метод
+                    UpdateButtonsState();
                 }
             }
         }
@@ -1401,13 +1384,7 @@ namespace BattleShip.Client
 
         private void UpdateButtonsState()
         {
-            // Можно искать соперника, если:
-            // 1. Все корабли расставлены
-            // 2. Не в процессе поиска
-            // 3. Не в игре ИЛИ в игре, но не сделан первый выстрел
-            bool canSearch = _gameLogic.AllShipsPlaced && 
-                           !_isSearching && 
-                           (!_networkService.IsInGame || (_networkService.IsInGame && !_firstShotMade));
+            bool canSearch = _gameLogic.AllShipsPlaced;
 
             PlayWithFriendButton.IsEnabled = canSearch;
             RandomOpponentButton.IsEnabled = canSearch;
@@ -1421,36 +1398,25 @@ namespace BattleShip.Client
             {
                 PlayWithFriendButton.Opacity = 1;
                 RandomOpponentButton.Opacity = 1;
-                if (!_showingSpecialMessage)
-                {
-                    GameStatus.Text = "Все корабли расставлены! Можете начинать игру.";
-                }
+                GameStatus.Text = "Все корабли расставлены! Можете начинать игру.";
             }
         }
 
         private void RandomPlacementButton_Click(object sender, RoutedEventArgs e)
         {
-            // Проверяем, не заблокирована ли расстановка
-            if (_gameLogic.IsRandomOpponentSelected || _networkService.IsInGame)
-                return;
-
             // Расставляем корабли случайным образом
             _gameLogic.RandomlyPlaceShips();
 
             // Обновляем отображение
             UpdateYourBoard();
             UpdateShipsInfo();
-            UpdateAllButtonsState(); // Используем обновленный метод
+            UpdateButtonsState();
 
             ShowSpecialMessage("Корабли расставлены случайным образом!", 2000);
         }
 
         private async void ClearBoardButton_Click(object sender, RoutedEventArgs e)
         {
-            // Проверяем, не заблокирована ли очистка
-            if (_gameLogic.IsRandomOpponentSelected || _networkService.IsInGame)
-                return;
-
             // Очищаем поле
             _gameLogic.ClearBoard();
 
@@ -1459,9 +1425,6 @@ namespace BattleShip.Client
             _opponentShots.Clear();
             _hitsOnPlayer.Clear();
             _hitsOnOpponent.Clear();
-            
-            // Сбрасываем флаг первого выстрела
-            _firstShotMade = false;
 
             // Обновляем отображение своего поля
             UpdateYourBoard();
@@ -1474,9 +1437,14 @@ namespace BattleShip.Client
             }
 
             UpdateShipsInfo();
-            UpdateAllButtonsState(); // Используем обновленный метод
+            UpdateButtonsState();
 
             ShowSpecialMessage("Поле очищено. Начинайте расстановку заново.", 3000);
+
+            // Показываем кнопки поиска
+            PlayWithFriendButton.Visibility = Visibility.Visible;
+            RandomOpponentButton.Visibility = Visibility.Visible;
+            SearchIndicator.Visibility = Visibility.Collapsed;
         }
 
         private async void StartGameAgainstComputer()
@@ -1498,41 +1466,21 @@ namespace BattleShip.Client
             // Очищаем историю выстрелов
             _playerShots.Clear();
             _hitsOnOpponent.Clear();
-            
-            // Сбрасываем флаг первого выстрела
-            _firstShotMade = false;
 
             // Создаем игру против компьютера
             string gameId = await _networkService.CreateGameAsync("computer");
 
             if (!string.IsNullOrEmpty(gameId))
             {
-                try
-                {
-                    // Отправляем расстановку кораблей
-                    var shipsData = ConvertShipsToNetworkFormat();
-                    await _networkService.SendShipsPlacementAsync(shipsData);
+                // Отправляем расстановку кораблей
+                var shipsData = ConvertShipsToNetworkFormat();
+                await _networkService.SendShipsPlacementAsync(shipsData);
 
-                    // Блокируем свое поле от изменений
-                    foreach (var cell in _playerCells.Values)
-                    {
-                        cell.IsEnabled = false;
-                    }
-                }
-                catch (Exception ex)
+                // Блокируем свое поле от изменений
+                foreach (var cell in _playerCells.Values)
                 {
-                    // Если не удалось отправить расстановку, отменяем игру
-                    MessageBox.Show($"Ошибка при отправке расстановки кораблей: {ex.Message}", "Ошибка",
-                        MessageBoxButton.OK, MessageBoxImage.Error);
-                    CancelSearch();
+                    cell.IsEnabled = false;
                 }
-            }
-            else
-            {
-                // Если не удалось создать игру
-                MessageBox.Show("Не удалось создать игру. Попробуйте еще раз.", "Ошибка",
-                    MessageBoxButton.OK, MessageBoxImage.Error);
-                CancelSearch();
             }
         }
 
@@ -1565,7 +1513,7 @@ namespace BattleShip.Client
 
         private void BackButton_Click(object sender, RoutedEventArgs e)
         {
-            if (_networkService.IsInGame && _firstShotMade)
+            if (_networkService.IsInGame)
             {
                 var result = MessageBox.Show("Вы в игре. Выйти из игры и вернуться в меню?",
                     "Подтверждение",
@@ -1578,14 +1526,12 @@ namespace BattleShip.Client
                 _networkService.LeaveGameAsync();
             }
 
-            // РАЗБЛОКИРОВКА при нажатии "Назад"
-            _gameLogic.CancelOpponentSelection();
-
             // Возвращаемся к выбору входа
             MainWindow mainWindow = new MainWindow();
             mainWindow.Show();
             this.Close();
         }
+
         private void PlayWithFriendButton_Click(object sender, RoutedEventArgs e)
         {
             // Заглушка для игры с другом
@@ -1611,80 +1557,28 @@ namespace BattleShip.Client
                 return;
             }
 
-            if (_networkService.IsInGame && _firstShotMade)
-            {
-                MessageBox.Show("Игра уже началась! Дождитесь окончания игры.", "Внимание",
-                    MessageBoxButton.OK, MessageBoxImage.Warning);
-                return;
-            }
-
-            // Начинаем поиск
+            // Начинаем игру против компьютера
             StartSearch();
-            
-            try
-            {
-                // Ждем немного для имитации поиска
-                await Task.Delay(1500);
-                
-                // Пробуем начать игру
-                StartGameAgainstComputer();
-            }
-            catch (Exception ex)
-            {
-                // Если что-то пошло не так, отменяем поиск
-                MessageBox.Show($"Ошибка при создании игры: {ex.Message}", "Ошибка",
-                    MessageBoxButton.OK, MessageBoxImage.Error);
-                CancelSearch();
-            }
-        }
-        
-        private void UpdateButtonsForOpponentSearch(bool isSearching)
-        {
-            // Определяем, нужно ли блокировать кнопки
-            // Кнопки блокируются если:
-            // 1. Идет поиск
-            // 2. Игра началась И сделан первый выстрел
-            bool shouldBlockButtons = isSearching || (_networkService.IsInGame && _firstShotMade);
-            
-            // Блокируем/разблокируем кнопки в зависимости от состояния
-            RandomPlacementButton.IsEnabled = !shouldBlockButtons;
-            ClearBoardButton.IsEnabled = !shouldBlockButtons;
-            
-            // Можно также изменить внешний вид кнопок
-            if (shouldBlockButtons)
-            {
-                RandomPlacementButton.Opacity = 0.5;
-                ClearBoardButton.Opacity = 0.5;
-            }
-            else
-            {
-                RandomPlacementButton.Opacity = 1.0;
-                ClearBoardButton.Opacity = 1.0;
-            }
+            await Task.Delay(1500); // Имитация поиска
+            StartGameAgainstComputer();
+            CancelSearch();
         }
 
         private void StartSearch()
         {
             _isSearching = true;
 
-            // Блокируем кнопки расстановки кораблей
-            UpdateButtonsForOpponentSearch(true);
-
-            // Скрываем кнопки поиска
+            // Скрываем кнопки
             PlayWithFriendButton.Visibility = Visibility.Collapsed;
             RandomOpponentButton.Visibility = Visibility.Collapsed;
             OpenChatButton.Visibility = Visibility.Collapsed;
 
-            // Показываем индикатор поиска и кнопку отмены
+            // Показываем индикатор поиска
             SearchIndicator.Visibility = Visibility.Visible;
-            CancelSearchButton.Visibility = Visibility.Visible; // Важно: показываем кнопку отмены
 
             // Меняем статус
             GameStatus.Text = "🔍 Поиск случайного соперника...";
             ConnectionStatus.Text = "Поиск...";
-            
-            // Обновляем состояние всех кнопок
-            UpdateAllButtonsState();
         }
 
         private void CancelSearchButton_Click(object sender, RoutedEventArgs e)
@@ -1696,52 +1590,27 @@ namespace BattleShip.Client
         {
             _isSearching = false;
 
-            // Выходим из игры, если она была создана
-            if (_networkService.IsInGame && !_firstShotMade)
+            // Показываем кнопки, если не в игре
+            if (!_networkService.IsInGame)
             {
-                _networkService.LeaveGameAsync();
+                PlayWithFriendButton.Visibility = Visibility.Visible;
+                RandomOpponentButton.Visibility = Visibility.Visible;
+                OpenChatButton.Visibility = Visibility.Collapsed;
             }
 
-            // Разблокируем кнопки расстановки кораблей
-            UpdateButtonsForOpponentSearch(false);
-
-            // Показываем кнопки поиска
-            PlayWithFriendButton.Visibility = Visibility.Visible;
-            RandomOpponentButton.Visibility = Visibility.Visible;
-            OpenChatButton.Visibility = Visibility.Collapsed;
-
-            // Скрываем индикатор поиска и кнопку отмены
+            // Скрываем индикатор поиска
             SearchIndicator.Visibility = Visibility.Collapsed;
-            CancelSearchButton.Visibility = Visibility.Collapsed;
 
             // Восстанавливаем статус
-            if (_networkService.IsInGame && _firstShotMade)
+            if (_networkService.IsInGame)
             {
-                // Если игра уже началась и сделан выстрел
-                GameStatus.Text = $"Игра началась! Противник: {_opponentName}";
-                ConnectionStatus.Text = "В игре";
-            }
-            else if (_networkService.IsInGame)
-            {
-                // Если игра началась, но выстрела еще не было
-                GameStatus.Text = $"Ожидание первого выстрела... Противник: {_opponentName}";
-                ConnectionStatus.Text = "В игре";
+                GameStatus.Text = "Игра началась!";
             }
             else
             {
-                // Если поиск отменен до начала игры
                 GameStatus.Text = "Подготовка к игре - расставьте корабли на вашем поле";
                 ConnectionStatus.Text = _networkService.IsConnected ? "Подключено" : "Не подключено";
             }
-            
-            // Обновляем состояние всех кнопок
-            UpdateAllButtonsState();
-        }
-        
-        private void UpdateAllButtonsState()
-        {
-            UpdateButtonsForOpponentSearch(_isSearching);
-            UpdateButtonsState();
         }
 
         protected override void OnClosing(System.ComponentModel.CancelEventArgs e)
@@ -1753,7 +1622,7 @@ namespace BattleShip.Client
                 return;
             }
 
-            if (_networkService.IsInGame && _firstShotMade)
+            if (_networkService.IsInGame)
             {
                 var result = MessageBox.Show("Вы в игре. Выйти из игры?",
                     "Подтверждение",

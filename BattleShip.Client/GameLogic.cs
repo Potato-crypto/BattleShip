@@ -19,14 +19,17 @@ namespace BattleShip.Client
         }
 
         private bool[,] _playerBoard;
-        public System.Collections.Generic.List<Ship> PlayerShips { get; private set; }
+        public List<Ship> PlayerShips { get; private set; }
         public bool AllShipsPlaced { get; private set; }
         private Random _random = new Random();
 
-        private readonly System.Collections.Generic.List<int> _requiredShips = new System.Collections.Generic.List<int> { 4, 3, 3, 2, 2, 2, 1, 1, 1, 1 };
+        private readonly List<int> _requiredShips = new List<int> { 4, 3, 3, 2, 2, 2, 1, 1, 1, 1 };
         private int _currentShipIndex = 0;
         private Ship _currentShipBeingPlaced = null;
         private bool _isPlacingShip = false;
+        
+        // Новое свойство: был ли выбран случайный соперник
+        public bool IsRandomOpponentSelected { get; private set; } = false;
 
         public GameLogic()
         {
@@ -44,6 +47,20 @@ namespace BattleShip.Client
             }
             _currentShipIndex = 0;
             _isPlacingShip = false;
+            _currentShipBeingPlaced = null;
+            AllShipsPlaced = false;
+        }
+
+        // Метод для выбора случайного соперника
+        public void SelectRandomOpponent()
+        {
+            IsRandomOpponentSelected = true;
+        }
+
+        // Метод для отмены выбора соперника
+        public void CancelOpponentSelection()
+        {
+            IsRandomOpponentSelected = false;
         }
 
         public Ship GetShipAt(int row, int col)
@@ -55,7 +72,7 @@ namespace BattleShip.Client
         public void RegisterHit(int row, int col)
         {
             var ship = GetShipAt(row, col);
-            if (ship != null)
+            if (ship != null && !ship.IsSunk)
             {
                 ship.Hits++;
             }
@@ -82,6 +99,10 @@ namespace BattleShip.Client
 
         public bool TryPlaceShipCell(int row, int col)
         {
+            // Если выбран случайный соперник, блокируем расстановку кораблей
+            if (IsRandomOpponentSelected)
+                return false;
+
             var currentShip = GetCurrentShip();
             if (currentShip == null || currentShip.IsPlaced) return false;
 
@@ -109,8 +130,10 @@ namespace BattleShip.Client
                 return false;
 
             // Ставим корабль сразу
+            currentShip.Cells.Clear();
             currentShip.Cells.Add((row, col));
             currentShip.IsPlaced = true;
+            currentShip.StartPosition = (row, col);
             _playerBoard[row, col] = true;
             
             _currentShipIndex++;
@@ -123,6 +146,10 @@ namespace BattleShip.Client
         {
             // Проверяем, можно ли поставить первую клетку
             if (!CanPlaceCell(row, col))
+                return false;
+
+            // Проверяем, что корабль можно разместить хотя бы в одном направлении
+            if (!CanShipFitAtPosition(row, col, currentShip.Size))
                 return false;
 
             // Создаем временный корабль для расстановки
@@ -138,6 +165,10 @@ namespace BattleShip.Client
         private bool ContinueShipPlacement(int row, int col, Ship currentShip)
         {
             if (!_isPlacingShip || _currentShipBeingPlaced == null)
+                return false;
+
+            // Проверяем, не пытаемся ли поставить ту же клетку
+            if (_currentShipBeingPlaced.Cells.Any(c => c.row == row && c.col == col))
                 return false;
 
             // Проверяем, можно ли поставить клетку
@@ -172,15 +203,20 @@ namespace BattleShip.Client
                 if (row != startPos.row)
                     return false;
 
-                // Клетки должны быть последовательными
-                var cols = _currentShipBeingPlaced.Cells.Select(c => c.col).ToList();
-                cols.Add(col);
-                cols.Sort();
+                // Определяем минимальную и максимальную колонку
+                int minCol = Math.Min(col, _currentShipBeingPlaced.Cells.Min(c => c.col));
+                int maxCol = Math.Max(col, _currentShipBeingPlaced.Cells.Max(c => c.col));
+                
+                // Проверяем, что разница между мин и макс соответствует размеру корабля
+                if (maxCol - minCol + 1 > currentShip.Size)
+                    return false;
 
-                // Проверяем, что все клетки идут подряд
-                for (int i = 1; i < cols.Count; i++)
+                // Проверяем, что все клетки идут подряд без пропусков
+                for (int c = minCol; c <= maxCol; c++)
                 {
-                    if (cols[i] != cols[i - 1] + 1)
+                    // Если есть пропуск в середине - не разрешаем
+                    bool cellExists = _currentShipBeingPlaced.Cells.Any(cell => cell.col == c) || c == col;
+                    if (!cellExists)
                         return false;
                 }
             }
@@ -190,15 +226,20 @@ namespace BattleShip.Client
                 if (col != startPos.col)
                     return false;
 
-                // Клетки должны быть последовательными
-                var rows = _currentShipBeingPlaced.Cells.Select(c => c.row).ToList();
-                rows.Add(row);
-                rows.Sort();
+                // Определяем минимальную и максимальную строку
+                int minRow = Math.Min(row, _currentShipBeingPlaced.Cells.Min(c => c.row));
+                int maxRow = Math.Max(row, _currentShipBeingPlaced.Cells.Max(c => c.row));
+                
+                // Проверяем, что разница между мин и макс соответствует размеру корабля
+                if (maxRow - minRow + 1 > currentShip.Size)
+                    return false;
 
-                // Проверяем, что все клетки идут подряд
-                for (int i = 1; i < rows.Count; i++)
+                // Проверяем, что все клетки идут подряд без пропусков
+                for (int r = minRow; r <= maxRow; r++)
                 {
-                    if (rows[i] != rows[i - 1] + 1)
+                    // Если есть пропуск в середине - не разрешаем
+                    bool cellExists = _currentShipBeingPlaced.Cells.Any(cell => cell.row == r) || r == row;
+                    if (!cellExists)
                         return false;
                 }
             }
@@ -220,10 +261,24 @@ namespace BattleShip.Client
             if (_currentShipBeingPlaced == null)
                 return false;
 
+            // Сортируем клетки для правильного порядка
+            if (_currentShipBeingPlaced.IsHorizontal)
+            {
+                _currentShipBeingPlaced.Cells = _currentShipBeingPlaced.Cells
+                    .OrderBy(c => c.col)
+                    .ToList();
+            }
+            else
+            {
+                _currentShipBeingPlaced.Cells = _currentShipBeingPlaced.Cells
+                    .OrderBy(c => c.row)
+                    .ToList();
+            }
+
             // Проверяем, что корабль не касается других кораблей
             foreach (var cell in _currentShipBeingPlaced.Cells)
             {
-                if (!CanPlaceCell(cell.row, cell.col, true))
+                if (!IsCellValidForShip(cell.row, cell.col, true))
                     return false;
             }
 
@@ -231,6 +286,7 @@ namespace BattleShip.Client
             currentShip.Cells.Clear();
             currentShip.Cells.AddRange(_currentShipBeingPlaced.Cells);
             currentShip.IsHorizontal = _currentShipBeingPlaced.IsHorizontal;
+            currentShip.StartPosition = _currentShipBeingPlaced.StartPosition;
             currentShip.IsPlaced = true;
 
             // Отмечаем клетки на доске
@@ -256,6 +312,11 @@ namespace BattleShip.Client
             if (!skipSelfCheck && _playerBoard[row, col])
                 return false;
             
+            return IsCellValidForShip(row, col, skipSelfCheck);
+        }
+
+        private bool IsCellValidForShip(int row, int col, bool skipSelfCheck = false)
+        {
             // Проверяем соседние клетки (включая диагонали)
             for (int i = -1; i <= 1; i++)
             {
@@ -278,8 +339,51 @@ namespace BattleShip.Client
             return true;
         }
 
+        // Новый метод: проверка возможности размещения корабля из данной позиции
+        private bool CanShipFitAtPosition(int row, int col, int shipSize)
+        {
+            // Проверяем горизонтальное размещение
+            bool canFitHorizontally = false;
+            if (col <= 10 - shipSize) // Проверяем, что корабль помещается по ширине
+            {
+                bool allCellsValid = true;
+                for (int i = 0; i < shipSize; i++)
+                {
+                    if (!IsCellValidForShip(row, col + i))
+                    {
+                        allCellsValid = false;
+                        break;
+                    }
+                }
+                canFitHorizontally = allCellsValid;
+            }
+
+            // Проверяем вертикальное размещение
+            bool canFitVertically = false;
+            if (row <= 10 - shipSize) // Проверяем, что корабль помещается по высоте
+            {
+                bool allCellsValid = true;
+                for (int i = 0; i < shipSize; i++)
+                {
+                    if (!IsCellValidForShip(row + i, col))
+                    {
+                        allCellsValid = false;
+                        break;
+                    }
+                }
+                canFitVertically = allCellsValid;
+            }
+
+            // Корабль можно разместить, если он помещается хотя бы в одном направлении
+            return canFitHorizontally || canFitVertically;
+        }
+
         public void RandomlyPlaceShips()
         {
+            // Если выбран случайный соперник, блокируем случайную расстановку
+            if (IsRandomOpponentSelected)
+                return;
+
             ClearBoard();
             
             foreach (var ship in PlayerShips)
@@ -287,21 +391,22 @@ namespace BattleShip.Client
                 bool placed = false;
                 int attempts = 0;
                 
-                while (!placed && attempts < 100)
+                while (!placed && attempts < 1000)
                 {
                     attempts++;
                     
                     bool horizontal = _random.Next(0, 2) == 0;
+                    int row, col;
                     
                     if (horizontal)
                     {
-                        int row = _random.Next(0, 10);
-                        int col = _random.Next(0, 11 - ship.Size);
+                        row = _random.Next(0, 10);
+                        col = _random.Next(0, 11 - ship.Size);
                         
                         bool canPlace = true;
                         for (int i = 0; i < ship.Size; i++)
                         {
-                            if (!CanPlaceCell(row, col + i))
+                            if (!IsCellValidForShip(row, col + i))
                             {
                                 canPlace = false;
                                 break;
@@ -317,19 +422,20 @@ namespace BattleShip.Client
                                 _playerBoard[row, col + i] = true;
                             }
                             ship.IsHorizontal = true;
+                            ship.StartPosition = (row, col);
                             ship.IsPlaced = true;
                             placed = true;
                         }
                     }
                     else
                     {
-                        int row = _random.Next(0, 11 - ship.Size);
-                        int col = _random.Next(0, 10);
+                        row = _random.Next(0, 11 - ship.Size);
+                        col = _random.Next(0, 10);
                         
                         bool canPlace = true;
                         for (int i = 0; i < ship.Size; i++)
                         {
-                            if (!CanPlaceCell(row + i, col))
+                            if (!IsCellValidForShip(row + i, col))
                             {
                                 canPlace = false;
                                 break;
@@ -345,6 +451,7 @@ namespace BattleShip.Client
                                 _playerBoard[row + i, col] = true;
                             }
                             ship.IsHorizontal = false;
+                            ship.StartPosition = (row, col);
                             ship.IsPlaced = true;
                             placed = true;
                         }
@@ -353,6 +460,8 @@ namespace BattleShip.Client
                 
                 if (!placed)
                 {
+                    // Если не удалось разместить корабль, начинаем заново
+                    ClearBoard();
                     RandomlyPlaceShips();
                     return;
                 }
@@ -364,6 +473,10 @@ namespace BattleShip.Client
 
         public void ClearBoard()
         {
+            // Если выбран случайный соперник, блокируем очистку поля
+            if (IsRandomOpponentSelected)
+                return;
+
             for (int i = 0; i < 10; i++)
                 for (int j = 0; j < 10; j++)
                     _playerBoard[i, j] = false;
@@ -372,6 +485,8 @@ namespace BattleShip.Client
             {
                 ship.Cells.Clear();
                 ship.IsPlaced = false;
+                ship.StartPosition = null;
+                ship.Hits = 0;
             }
             
             _currentShipIndex = 0;
@@ -382,6 +497,10 @@ namespace BattleShip.Client
 
         public void RemoveLastCell()
         {
+            // Если выбран случайный соперник, блокируем удаление клеток
+            if (IsRandomOpponentSelected)
+                return;
+
             if (_isPlacingShip && _currentShipBeingPlaced != null)
             {
                 if (_currentShipBeingPlaced.Cells.Count > 0)
@@ -390,8 +509,7 @@ namespace BattleShip.Client
                     
                     if (_currentShipBeingPlaced.Cells.Count == 0)
                     {
-                        _currentShipBeingPlaced = null;
-                        _isPlacingShip = false;
+                        CancelCurrentShipPlacement();
                     }
                 }
             }
@@ -407,6 +525,7 @@ namespace BattleShip.Client
                     
                     lastShip.Cells.Clear();
                     lastShip.IsPlaced = false;
+                    lastShip.StartPosition = null;
                     _currentShipIndex--;
                     AllShipsPlaced = false;
                 }
@@ -436,31 +555,51 @@ namespace BattleShip.Client
 
         public List<(int row, int col)> GetCurrentShipBeingPlacedCells()
         {
+            // Если выбран случайный соперник, не показываем клетки расставляемого корабля
+            if (IsRandomOpponentSelected)
+                return new List<(int row, int col)>();
+
             if (_currentShipBeingPlaced != null)
             {
-                return _currentShipBeingPlaced.Cells;
+                // Возвращаем отсортированные клетки
+                if (_currentShipBeingPlaced.IsHorizontal)
+                {
+                    return _currentShipBeingPlaced.Cells
+                        .OrderBy(c => c.col)
+                        .ToList();
+                }
+                else
+                {
+                    return _currentShipBeingPlaced.Cells
+                        .OrderBy(c => c.row)
+                        .ToList();
+                }
             }
             return new List<(int row, int col)>();
         }
 
         public string GetCurrentShipInfo()
         {
+            // Если выбран случайный соперник, меняем сообщение
+            if (IsRandomOpponentSelected)
+                return "Ожидание соперника... Расстановка заблокирована";
+
+            var currentShip = GetCurrentShip();
+            
             if (_isPlacingShip && _currentShipBeingPlaced != null)
             {
-                var currentShip = GetCurrentShip();
                 if (currentShip != null)
                 {
                     return $"Корабль {currentShip.Size} клетки - поставлено {_currentShipBeingPlaced.Cells.Count}/{currentShip.Size} (ПКМ - отменить)";
                 }
             }
             
-            var ship = GetCurrentShip();
-            if (ship != null && !ship.IsPlaced)
+            if (currentShip != null && !currentShip.IsPlaced)
             {
-                if (ship.Size == 1)
+                if (currentShip.Size == 1)
                     return $"Кликните на клетку для однопалубного корабля (1 клетка)";
                 else
-                    return $"Нажмите на первую клетку для корабля размером {ship.Size} клетки";
+                    return $"Нажмите на первую клетку для корабля размером {currentShip.Size} клетки";
             }
             
             return "Все корабли размещены";
@@ -475,6 +614,199 @@ namespace BattleShip.Client
         {
             _currentShipBeingPlaced = null;
             _isPlacingShip = false;
+        }
+
+        // Обновленный метод для получения клеток предпросмотра с учетом ограничений
+        public List<(int row, int col)> GetShipPreview(int row, int col)
+        {
+            // Если выбран случайный соперник, не показываем предпросмотр
+            if (IsRandomOpponentSelected)
+                return new List<(int row, int col)>();
+
+            var preview = new List<(int row, int col)>();
+            
+            var currentShip = GetCurrentShip();
+            if (currentShip == null || currentShip.IsPlaced || currentShip.Size == 1)
+                return preview;
+
+            if (!_isPlacingShip || _currentShipBeingPlaced == null)
+            {
+                // Предпросмотр первой клетки - только если корабль можно разместить
+                if (CanPlaceCell(row, col) && CanShipFitAtPosition(row, col, currentShip.Size))
+                {
+                    preview.Add((row, col));
+                }
+            }
+            else
+            {
+                // Предпросмотр продолжения корабля
+                var startPos = _currentShipBeingPlaced.StartPosition.Value;
+                int cellsPlaced = _currentShipBeingPlaced.Cells.Count;
+                int cellsNeeded = currentShip.Size - cellsPlaced;
+
+                if (cellsNeeded > 0)
+                {
+                    if (_currentShipBeingPlaced.Cells.Count == 1)
+                    {
+                        // Еще не определили направление - показываем оба варианта, но с учетом доступного места
+                        if (row == startPos.row)
+                        {
+                            // Горизонтальное направление
+                            int minCol = Math.Min(col, startPos.col);
+                            int maxCol = Math.Max(col, startPos.col);
+                            
+                            // Проверяем, что мы не выходим за пределы допустимых размеров
+                            if (maxCol - minCol + 1 <= currentShip.Size)
+                            {
+                                // Проверяем все клетки на валидность
+                                bool allValid = true;
+                                for (int c = minCol; c <= maxCol; c++)
+                                {
+                                    if (!CanPlaceCell(startPos.row, c))
+                                    {
+                                        allValid = false;
+                                        break;
+                                    }
+                                }
+                                
+                                if (allValid)
+                                {
+                                    for (int c = minCol; c <= maxCol; c++)
+                                    {
+                                        if (c != startPos.col || row != startPos.row)
+                                        {
+                                            preview.Add((row, c));
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        
+                        if (col == startPos.col)
+                        {
+                            // Вертикальное направление
+                            int minRow = Math.Min(row, startPos.row);
+                            int maxRow = Math.Max(row, startPos.row);
+                            
+                            // Проверяем, что мы не выходим за пределы допустимых размеров
+                            if (maxRow - minRow + 1 <= currentShip.Size)
+                            {
+                                // Проверяем все клетки на валидность
+                                bool allValid = true;
+                                for (int r = minRow; r <= maxRow; r++)
+                                {
+                                    if (!CanPlaceCell(r, startPos.col))
+                                    {
+                                        allValid = false;
+                                        break;
+                                    }
+                                }
+                                
+                                if (allValid)
+                                {
+                                    for (int r = minRow; r <= maxRow; r++)
+                                    {
+                                        if (r != startPos.row || col != startPos.col)
+                                        {
+                                            preview.Add((r, col));
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    else
+                    {
+                        // Направление уже определено
+                        if (_currentShipBeingPlaced.IsHorizontal)
+                        {
+                            int minCol = _currentShipBeingPlaced.Cells.Min(c => c.col);
+                            int maxCol = _currentShipBeingPlaced.Cells.Max(c => c.col);
+                            
+                            // Проверяем, что добавление новой клетки не превысит размер корабля
+                            int potentialMin = Math.Min(col, minCol);
+                            int potentialMax = Math.Max(col, maxCol);
+                            
+                            if (potentialMax - potentialMin + 1 <= currentShip.Size)
+                            {
+                                // Проверяем все клетки между minCol и col (или col и maxCol)
+                                int checkStart = potentialMin;
+                                int checkEnd = potentialMax;
+                                
+                                bool allValid = true;
+                                for (int c = checkStart; c <= checkEnd; c++)
+                                {
+                                    if (!_currentShipBeingPlaced.Cells.Any(cell => cell.col == c) && !CanPlaceCell(startPos.row, c))
+                                    {
+                                        allValid = false;
+                                        break;
+                                    }
+                                }
+                                
+                                if (allValid && CanPlaceCell(row, col))
+                                {
+                                    if (col < minCol)
+                                    {
+                                        preview.Add((row, col));
+                                    }
+                                    else if (col > maxCol)
+                                    {
+                                        preview.Add((row, col));
+                                    }
+                                }
+                            }
+                        }
+                        else
+                        {
+                            int minRow = _currentShipBeingPlaced.Cells.Min(c => c.row);
+                            int maxRow = _currentShipBeingPlaced.Cells.Max(c => c.row);
+                            
+                            // Проверяем, что добавление новой клетки не превысит размер корабля
+                            int potentialMin = Math.Min(row, minRow);
+                            int potentialMax = Math.Max(row, maxRow);
+                            
+                            if (potentialMax - potentialMin + 1 <= currentShip.Size)
+                            {
+                                // Проверяем все клетки между minRow и row (или row и maxRow)
+                                int checkStart = potentialMin;
+                                int checkEnd = potentialMax;
+                                
+                                bool allValid = true;
+                                for (int r = checkStart; r <= checkEnd; r++)
+                                {
+                                    if (!_currentShipBeingPlaced.Cells.Any(cell => cell.row == r) && !CanPlaceCell(r, startPos.col))
+                                    {
+                                        allValid = false;
+                                        break;
+                                    }
+                                }
+                                
+                                if (allValid && CanPlaceCell(row, col))
+                                {
+                                    if (row < minRow)
+                                    {
+                                        preview.Add((row, col));
+                                    }
+                                    else if (row > maxRow)
+                                    {
+                                        preview.Add((row, col));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            return preview;
+        }
+
+        // Новый метод для сброса состояния игры
+        public void ResetGame()
+        {
+            CancelOpponentSelection();
+            ClearBoard();
+            InitializeShips();
         }
     }
 }

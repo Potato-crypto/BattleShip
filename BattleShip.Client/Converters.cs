@@ -1,26 +1,26 @@
-    using System;
-    using System.Globalization;
-    using System.Windows;
-    using System.Windows.Data;
+using System;
+using System.Globalization;
+using System.Windows;
+using System.Windows.Data;
 
-    namespace BattleShip.Client
+namespace BattleShip.Client
+{
+    public class BoolToVisibilityConverter : IValueConverter
     {
-        public class BoolToVisibilityConverter : IValueConverter
+        public object Convert(object value, Type targetType, object parameter, CultureInfo culture)
         {
-            public object Convert(object value, Type targetType, object parameter, CultureInfo culture)
-            {
-                return (value is bool boolValue && boolValue) ? Visibility.Visible : Visibility.Collapsed;
-            }
+            return (value is bool boolValue && boolValue) ? Visibility.Visible : Visibility.Collapsed;
+        }
 
-            public object ConvertBack(object value, Type targetType, object parameter, CultureInfo culture)
+        public object ConvertBack(object value, Type targetType, object parameter, CultureInfo culture)
+        {
+            if (value is Visibility visibility)
             {
-                if (value is Visibility visibility)
-                {
-                    // Например, для конвертера BoolToVisibility:
-                    return visibility == Visibility.Visible;
-                }
-    
-                return DependencyProperty.UnsetValue; // или false
+                // Например, для конвертера BoolToVisibility:
+                return visibility == Visibility.Visible;
             }
+    
+            return DependencyProperty.UnsetValue; // или false
         }
     }
+}

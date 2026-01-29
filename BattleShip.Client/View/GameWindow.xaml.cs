@@ -1389,6 +1389,10 @@ namespace BattleShip.Client
 
         private void RandomPlacementButton_Click(object sender, RoutedEventArgs e)
         {
+            // Проверяем, не заблокирована ли расстановка
+            if (_gameLogic.IsRandomOpponentSelected)
+                return;
+
             // Расставляем корабли случайным образом
             _gameLogic.RandomlyPlaceShips();
 
@@ -1402,6 +1406,10 @@ namespace BattleShip.Client
 
         private async void ClearBoardButton_Click(object sender, RoutedEventArgs e)
         {
+            // Проверяем, не заблокирована ли очистка
+            if (_gameLogic.IsRandomOpponentSelected)
+                return;
+
             // Очищаем поле
             _gameLogic.ClearBoard();
 
@@ -1506,12 +1514,14 @@ namespace BattleShip.Client
                 _networkService.LeaveGameAsync();
             }
 
+            // РАЗБЛОКИРОВКА при нажатии "Назад"
+            _gameLogic.CancelOpponentSelection();
+
             // Возвращаемся к выбору входа
             MainWindow mainWindow = new MainWindow();
             mainWindow.Show();
             this.Close();
         }
-
         private void PlayWithFriendButton_Click(object sender, RoutedEventArgs e)
         {
             // Заглушка для игры с другом
@@ -1537,16 +1547,45 @@ namespace BattleShip.Client
                 return;
             }
 
+            // БЛОКИРОВКА: устанавливаем флаг выбора соперника
+            _gameLogic.SelectRandomOpponent();
+
             // Начинаем игру против компьютера
             StartSearch();
             await Task.Delay(1500); // Имитация поиска
             StartGameAgainstComputer();
+    
+            // Отменяем поиск (но не разблокируем кнопки!)
             CancelSearch();
+    
+            // Не разблокируем кнопки здесь - они должны оставаться заблокированными
+            // Кнопки разблокируются только при нажатии "Назад" или "Отменить"
+        }
+        private void UpdateButtonsForOpponentSearch(bool isSearching)
+        {
+            // Блокируем/разблокируем кнопки в зависимости от состояния
+            RandomPlacementButton.IsEnabled = !isSearching;
+            ClearBoardButton.IsEnabled = !isSearching;
+            
+            // Можно также изменить внешний вид кнопок
+            if (isSearching)
+            {
+                RandomPlacementButton.Opacity = 0.5;
+                ClearBoardButton.Opacity = 0.5;
+            }
+            else
+            {
+                RandomPlacementButton.Opacity = 1.0;
+                ClearBoardButton.Opacity = 1.0;
+            }
         }
 
         private void StartSearch()
         {
             _isSearching = true;
+
+            // Блокируем кнопки
+            UpdateButtonsForOpponentSearch(true);
 
             // Скрываем кнопки
             PlayWithFriendButton.Visibility = Visibility.Collapsed;
@@ -1569,6 +1608,12 @@ namespace BattleShip.Client
         private void CancelSearch()
         {
             _isSearching = false;
+
+            // РАЗБЛОКИРОВКА: снимаем флаг выбора соперника
+            _gameLogic.CancelOpponentSelection();
+
+            // Разблокируем кнопки
+            UpdateButtonsForOpponentSearch(false);
 
             // Показываем кнопки
             PlayWithFriendButton.Visibility = Visibility.Visible;

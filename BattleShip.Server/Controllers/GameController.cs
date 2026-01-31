@@ -11,128 +11,219 @@ namespace BattleShip.Server.Controllers
     {
         private readonly FirebaseService _firebaseService;
         private readonly GameService _gameService;
+        private readonly ILogger<GameController> _logger;
 
-        public GameController(FirebaseService firebaseService, GameService gameService)
+        public GameController(
+            FirebaseService firebaseService,
+            GameService gameService,
+            ILogger<GameController> logger)
         {
             _firebaseService = firebaseService;
             _gameService = gameService;
+            _logger = logger;
         }
 
-        [HttpPost("find-game")]
-        public async Task<IActionResult> FindGame([FromBody] FindGameRequest request)
+        // 🔥 НОВАЯ ЛОГИКА: Игрок готов к поиску противника
+        [HttpPost("ready-for-matchmaking")]
+        public async Task<IActionResult> ReadyForMatchmaking([FromBody] ReadyForMatchmakingRequest request)
         {
-            Console.WriteLine($"🔍 Поиск игры для: {request.PlayerName}");
+            _logger.LogInformation($"🎮 Игрок {request.PlayerName} готов к поиску противника");
 
-            // 1. Сначала ищем существующую игру в ожидании
-            var waitingGames = await _firebaseService.FindWaitingGamesAsync();
-
-            if (waitingGames.Any())
+            // 1. Проверяем что все корабли расставлены
+            if (request.Ships == null || request.Ships.Count != 10)
             {
-                // Нашли ожидающую игру - присоединяемся
-                var existingGame = waitingGames.First();
-                existingGame.Player2Id = await _firebaseService.CreateTestUser();
-                existingGame.Status = GameStatus.PlacingShips;
-
-                Console.WriteLine($"✅ Нашлась ожидающая игра {existingGame.Id}");
-
-                await _firebaseService.UpdateGameAsync(existingGame);
-
-                return Ok(new
+                return BadRequest(new
                 {
-                    Success = true,
-                    GameId = existingGame.Id,
-                    PlayerId = existingGame.Player2Id, // Игрок становится Player2
-                    IsPlayer1 = false, // Это второй игрок
-                    GameStatus = existingGame.Status.ToString(),
-                    Message = "Присоединились к существующей игре!"
+                    Success = false,
+                    Message = "Должно быть расставлено 10 кораблей"
                 });
             }
-            else
+
+            // 2. Создаем доску игрока
+            var playerBoard = new Board();
+            playerBoard.InitializeBoard(request.Ships);
+
+            // 3. Проверяем правильность расстановки
+            if (!playerBoard.ValidateShipPlacement())
             {
-                // Не нашли - создаем новую игру
+                return BadRequest(new
+                {
+                    Success = false,
+                    Message = "Некорректная расстановка кораблей"
+                });
+            }
+
+            // 4. Ищем игрока в лобби
+            var opponent = await _firebaseService.FindOpponentInLobbyAsync(request.PlayerName);
+
+            if (opponent != null)
+            {
+                // НАШЛИ ПРОТИВНИКА! Создаем игру
+                _logger.LogInformation($"✅ Найден противник: {opponent.PlayerName}");
+
                 var game = new Game
                 {
-                    Player1Id = await _firebaseService.CreateTestUser(),
-                    Status = GameStatus.WaitingForPlayer, // Ожидание второго игрока
-                    Player1Ready = false,
-                    Player2Ready = false
+                    Id = Guid.NewGuid().ToString(),
+                    Player1Id = opponent.PlayerId,
+                    Player2Id = await _firebaseService.CreateTestUser(), // Текущий игрок
+                    Player1Name = opponent.PlayerName,
+                    Player2Name = request.PlayerName,
+                    Status = GameStatus.PlacingShips,
+                    CreatedAt = DateTime.UtcNow
                 };
 
-                // Создаем доски
-                game.Player1Board = new Board();
-                game.Player2Board = new Board();
+                // Сохраняем доски
+                game.Player1Board = opponent.Board; // Доска противника (уже расставлена)
+                game.Player2Board = playerBoard;    // Доска текущего игрока
+
+                // Устанавливаем кто первый ходит (случайно)
+                game.CurrentPlayerId = new Random().Next(0, 2) == 0
+                    ? game.Player1Id
+                    : game.Player2Id;
+
+                game.Status = game.CurrentPlayerId == game.Player1Id
+                    ? GameStatus.Player1Turn
+                    : GameStatus.Player2Turn;
 
                 await _firebaseService.SaveGameAsync(game);
 
-                Console.WriteLine($"🆕 Создана новая игра {game.Id}");
+                // Удаляем противника из лобби
+                await _firebaseService.RemoveFromLobbyAsync(opponent.PlayerId);
 
                 return Ok(new
                 {
                     Success = true,
                     GameId = game.Id,
-                    PlayerId = game.Player1Id, // Игрок становится Player1
-                    IsPlayer1 = true,
+                    PlayerId = game.Player2Id,
+                    OpponentName = opponent.PlayerName,
                     GameStatus = game.Status.ToString(),
-                    Message = "Игра создана. Ожидаем второго игрока..."
+                    IsMyTurn = game.CurrentPlayerId == game.Player2Id,
+                    Message = $"Игра началась против {opponent.PlayerName}!"
+                });
+            }
+            else
+            {
+                // НЕ НАШЛИ - добавляем себя в лобби
+                _logger.LogInformation($"⏳ Игрок {request.PlayerName} добавлен в лобби");
+
+                var playerId = await _firebaseService.AddToLobbyAsync(
+                    request.PlayerName,
+                    playerBoard
+                );
+
+                return Ok(new
+                {
+                    Success = true,
+                    PlayerId = playerId,
+                    InLobby = true,
+                    Message = "Ожидаем противника...",
+                    WaitEndpoint = $"/api/Game/wait-for-opponent/{playerId}"
                 });
             }
         }
 
-        [HttpGet("test")]
-        public IActionResult Test()
+        // 🔥 Ожидание противника в лобби
+        [HttpGet("wait-for-opponent/{playerId}")]
+        public async Task<IActionResult> WaitForOpponent(string playerId)
         {
+            _logger.LogInformation($"⏳ Ожидание для игрока {playerId}");
+
+            int maxAttempts = 30; // 30 * 2 сек = 1 минута
+            for (int i = 0; i < maxAttempts; i++)
+            {
+                // Проверяем нашли ли мы игру
+                var game = await _firebaseService.FindGameByPlayerIdAsync(playerId);
+
+                if (game != null)
+                {
+                    // Игра найдена!
+                    bool isPlayer1 = game.Player1Id == playerId;
+
+                    return Ok(new
+                    {
+                        Success = true,
+                        GameFound = true,
+                        GameId = game.Id,
+                        PlayerId = playerId,
+                        OpponentName = isPlayer1 ? game.Player2Name : game.Player1Name,
+                        GameStatus = game.Status.ToString(),
+                        IsMyTurn = game.CurrentPlayerId == playerId,
+                        Message = $"Игра началась против {(isPlayer1 ? game.Player2Name : game.Player1Name)}!"
+                    });
+                }
+
+                // Проверяем не вышел ли игрок из лобби
+                var inLobby = await _firebaseService.IsPlayerInLobbyAsync(playerId);
+                if (!inLobby)
+                {
+                    return Ok(new
+                    {
+                        Success = false,
+                        GameFound = false,
+                        Message = "Вы вышли из лобби"
+                    });
+                }
+
+                await Task.Delay(2000); // Ждем 2 секунды
+            }
+
+            // Время вышло
+            await _firebaseService.RemoveFromLobbyAsync(playerId);
+
             return Ok(new
             {
-                Message = "BattleShip Server работает!",
-                Time = DateTime.Now,
-                Project = "Морской бой",
-                Team = "3 разработчика"
+                Success = false,
+                GameFound = false,
+                Timeout = true,
+                Message = "Время ожидания истекло"
             });
         }
 
-        [HttpPost("{id}/ready")]
-        public async Task<IActionResult> PlayerReady(string id, [FromBody] SimpleReadyRequest request)
+        // 🔥 Выход из лобби
+        [HttpPost("cancel-matchmaking")]
+        public async Task<IActionResult> CancelMatchmaking([FromBody] string playerId)
         {
-            var game = await _firebaseService.GetGameAsync(id);
+            await _firebaseService.RemoveFromLobbyAsync(playerId);
+
+            return Ok(new
+            {
+                Success = true,
+                Message = "Поиск отменен"
+            });
+        }
+
+        // 🔥 Выход из игры (с присвоением поражения)
+        [HttpPost("{gameId}/surrender")]
+        public async Task<IActionResult> Surrender(string gameId, [FromBody] SurrenderRequest request)
+        {
+            _logger.LogInformation($"🏳️ Игрок {request.PlayerId} сдается в игре {gameId}");
+
+            var game = await _firebaseService.GetGameAsync(gameId);
             if (game == null)
                 return NotFound(new { Message = "Игра не найдена" });
 
+            // Определяем кто сдается
             bool isPlayer1 = request.PlayerId == game.Player1Id;
-            bool isPlayer2 = request.PlayerId == game.Player2Id;
 
-            if (!isPlayer1 && !isPlayer2)
+            if (!isPlayer1 && request.PlayerId != game.Player2Id)
                 return Unauthorized(new { Message = "Вы не участник этой игры" });
 
-            var playerBoard = isPlayer1 ? game.Player1Board : game.Player2Board;
-
-            if (request.Ships != null && request.Ships.Any())
-            {
-                Console.WriteLine($"💾 Сохраняем {request.Ships.Count} кораблей от игрока {(isPlayer1 ? "1" : "2")}");
-
-                playerBoard.InitializeBoard(request.Ships);
-
-                int shipCells = playerBoard.Cells.Count(c => c.HasShip);
-                Console.WriteLine($"✅ После инициализации: {shipCells} клеток с кораблями");
-
-                foreach (var ship in playerBoard.Ships)
-                {
-                    Console.WriteLine($"   🚢 {ship.Name}: {ship.CellCoordinates?.Count ?? 0} клеток");
-                }
-            }
-
+            // Присваиваем победу противнику
             if (isPlayer1)
-                game.Player1Ready = true;
-            else
-                game.Player2Ready = true;
-
-            bool bothReady = game.Player1Ready && game.Player2Ready;
-
-            if (bothReady)
             {
-                game.Status = GameStatus.Player1Turn;
-                game.CurrentPlayerId = game.Player1Id;
-                Console.WriteLine($"🎮 Оба игрока готовы! Игра начинается!");
+                game.Status = GameStatus.Player2Won;
+                _logger.LogInformation($"🏆 Победа игроку {game.Player2Name} (игрок {game.Player1Name} сдался)");
             }
+            else
+            {
+                game.Status = GameStatus.Player1Won;
+                _logger.LogInformation($"🏆 Победа игроку {game.Player1Name} (игрок {game.Player2Name} сдался)");
+            }
+
+            game.EndedAt = DateTime.UtcNow;
+            game.WinnerId = isPlayer1 ? game.Player2Id : game.Player1Id;
+            game.LoserId = request.PlayerId;
+            game.Surrender = true;
 
             await _firebaseService.UpdateGameAsync(game);
 
@@ -140,282 +231,128 @@ namespace BattleShip.Server.Controllers
             {
                 Success = true,
                 GameStatus = game.Status.ToString(),
-                BothReady = bothReady,
-                Player = isPlayer1 ? "Player1" : "Player2",
-                ShipsPlaced = playerBoard.Ships?.Count ?? 0,
-                ShipCells = playerBoard.Cells?.Count(c => c.HasShip) ?? 0,
-                Message = "Корабли расставлены!"
+                Winner = isPlayer1 ? game.Player2Name : game.Player1Name,
+                Loser = isPlayer1 ? game.Player1Name : game.Player2Name,
+                Message = "Игра завершена"
             });
         }
 
-        [HttpPost("{id}/place-ships-manual")]
-        public async Task<IActionResult> PlaceShipsManual(string id, [FromBody] PlaceShipsManualRequest request)
-        {
-            var game = await _firebaseService.GetGameAsync(id);
-            if (game == null)
-                return NotFound(new { Message = "Игра не найдена" });
-
-            // Проверяем что игра в фазе расстановки
-            if (game.Status != GameStatus.PlacingShips &&
-                game.Status != GameStatus.Player1Ready &&
-                game.Status != GameStatus.Player2Ready)
-                return BadRequest(new { Message = "Не время для расстановки кораблей" });
-
-            bool isPlayer1 = request.PlayerId == game.Player1Id;
-            bool isPlayer2 = request.PlayerId == game.Player2Id;
-
-            if (!isPlayer1 && !isPlayer2)
-                return Unauthorized(new { Message = "Вы не участник этой игры" });
-
-            var targetBoard = isPlayer1 ? game.Player1Board : game.Player2Board;
-
-            // Очищаем старые корабли
-            targetBoard.Ships?.Clear();
-
-            // Добавляем новые корабли от фронтенда
-            if (request.Ships != null)
-            {
-                foreach (var ship in request.Ships)
-                {
-                    // Проверяем что корабль можно разместить
-                    if (ValidateShipPlacement(targetBoard, ship))
-                    {
-                        targetBoard.Ships.Add(ship);
-                    }
-                    else
-                    {
-                        return BadRequest(new { Message = $"Невозможно разместить корабль {ship.Name}" });
-                    }
-                }
-
-                // Восстанавливаем связи
-                targetBoard.RestoreCellShipReferences();
-            }
-
-            await _firebaseService.UpdateGameAsync(game);
-
-            return Ok(new
-            {
-                Success = true,
-                ShipsPlaced = targetBoard.Ships.Count,
-                Message = "Корабли успешно расставлены"
-            });
-        }
-
-        private bool ValidateShipPlacement(Board board, Ship ship)
-        {
-            // Проверка что корабль помещается на доске
-            // и не пересекается с другими кораблями
-            // (нужно реализовать)
-            return true;
-        }
-
-        [HttpGet("{id}")]
-        public async Task<IActionResult> GetGame(string id)
-        {
-            var game = await _firebaseService.GetGameAsync(id);
-            if (game == null)
-                return NotFound(new { Message = "Игра не найдена" });
-
-            return Ok(new
-            {
-                game.Id,
-                game.Player1Id,
-                game.Player2Id,
-                game.Status,
-                game.CurrentPlayerId,
-                Player1Board = new
-                {
-                    ShipsCount = game.Player1Board.Ships?.Count ?? 0,
-                    CellsCount = game.Player1Board.Cells?.Count ?? 0
-                },
-                Player2Board = new
-                {
-                    ShipsCount = game.Player2Board.Ships?.Count ?? 0,
-                    CellsCount = game.Player2Board.Cells?.Count ?? 0
-                },
-                game.CreatedAt
-            });
-        }
-
-        [HttpGet("{id}/validate")]
-        public async Task<IActionResult> ValidateGame(string id)
-        {
-            var game = await _firebaseService.GetGameAsync(id);
-            if (game == null)
-                return NotFound(new { Message = "Игра не найдена" });
-
-            var issues = new List<string>();
-
-            // Проверка Player1Board
-            if (game.Player1Board?.Cells?.Count != 100)
-                issues.Add($"Player1Board: {game.Player1Board?.Cells?.Count ?? 0} клеток вместо 100");
-
-            if (game.Player1Board?.Ships?.Count != 10)
-                issues.Add($"Player1Board: {game.Player1Board?.Ships?.Count ?? 0} кораблей вместо 10");
-
-            var p1ShipCells = game.Player1Board?.Cells?.Count(c => c.HasShip) ?? 0;
-            if (p1ShipCells != 20) // 4+3+3+2+2+2+1+1+1+1 = 20
-                issues.Add($"Player1Board: {p1ShipCells} клеток с кораблями вместо 20");
-
-            // Проверка Player2Board
-            if (game.Player2Board?.Cells?.Count != 100)
-                issues.Add($"Player2Board: {game.Player2Board?.Cells?.Count ?? 0} клеток вместо 100");
-
-            if (game.Player2Board?.Ships?.Count != 10)
-                issues.Add($"Player2Board: {game.Player2Board?.Ships?.Count ?? 0} кораблей вместо 10");
-
-            var p2ShipCells = game.Player2Board?.Cells?.Count(c => c.HasShip) ?? 0;
-            if (p2ShipCells != 20)
-                issues.Add($"Player2Board: {p2ShipCells} клеток с кораблями вместо 20");
-
-            return Ok(new
-            {
-                GameId = id,
-                Status = game.Status.ToString(),
-                Player1Id = game.Player1Id,
-                Player2Id = game.Player2Id,
-                Player1Board = new
-                {
-                    Cells = game.Player1Board?.Cells?.Count ?? 0,
-                    Ships = game.Player1Board?.Ships?.Count ?? 0,
-                    ShipCells = game.Player1Board?.Cells?.Count(c => c.HasShip) ?? 0,
-                    HasNullCells = game.Player1Board?.Cells?.Any(c => c == null) ?? false
-                },
-                Player2Board = new
-                {
-                    Cells = game.Player2Board?.Cells?.Count ?? 0,
-                    Ships = game.Player2Board?.Ships?.Count ?? 0,
-                    ShipCells = game.Player2Board?.Cells?.Count(c => c.HasShip) ?? 0,
-                    HasNullCells = game.Player2Board?.Cells?.Any(c => c == null) ?? false
-                },
-                Issues = issues,
-                IsValid = issues.Count == 0
-            });
-        }
-
-        [HttpPost("{id}/join")]
-        public async Task<IActionResult> JoinGame(string id, [FromBody] string playerName)
-        {
-            var game = await _firebaseService.GetGameAsync(id);
-            if (game == null)
-                return NotFound(new { Message = "Игра не найдена" });
-
-            if (game.Status != GameStatus.WaitingForPlayer)
-                return BadRequest(new { Message = "Игра уже началась" });
-
-            if (game.Player1Board == null) game.Player1Board = new Board();
-            if (game.Player2Board == null) game.Player2Board = new Board();
-
-            // Присоединяем второго игрока
-            game.Player2Id = await _firebaseService.CreateTestUser();
-            game.Status = GameStatus.PlacingShips;
-
-            await _firebaseService.UpdateGameAsync(game);
-
-            return Ok(new
-            {
-                Success = true,
-                GameId = id,
-                Status = game.Status.ToString(),
-                Player1Id = game.Player1Id,
-                Player2Id = game.Player2Id,
-                Message = $"Игрок {playerName} присоединился. Расставляйте корабли!"
-            });
-        }
-
+        // Fire 
         [HttpPost("{id}/fire")]
         public async Task<IActionResult> Fire(string id, [FromBody] FireRequest request)
         {
-            Console.WriteLine($"🔥 Fire запрос: gameId={id}, playerId={request.PlayerId}, x={request.X}, y={request.Y}");
+            _logger.LogInformation($"🔥 Выстрел: игра={id}, игрок={request.PlayerId}, x={request.X}, y={request.Y}");
 
             var game = await _firebaseService.GetGameAsync(id);
             if (game == null)
-            {
-                Console.WriteLine($"❌ Игра {id} не найдена");
-                return NotFound(new
-                {
-                    Success = false,
-                    Message = "Игра не найдена",
-                    Code = "GAME_NOT_FOUND"
-                });
-            }
+                return NotFound(new { Message = "Игра не найдена" });
 
-            Console.WriteLine($"📊 Статус игры: {game.Status}, CurrentPlayer: {game.CurrentPlayerId}");
-            Console.WriteLine($"👤 Player1: {game.Player1Id}, Player2: {game.Player2Id}");
+            // Проверяем статус игры
+            if (game.Status == GameStatus.Player1Won || game.Status == GameStatus.Player2Won)
+                return BadRequest(new { Message = "Игра уже завершена" });
 
-            // Проверяем чей сейчас ход
             if (game.Status != GameStatus.Player1Turn && game.Status != GameStatus.Player2Turn)
-            {
-                Console.WriteLine($"❌ Игра не в активной фазе. Статус: {game.Status}");
-                return BadRequest(new
-                {
-                    Success = false,
-                    Message = "Игра не в активной фазе",
-                    Code = "GAME_NOT_ACTIVE"
-                });
-            }
+                return BadRequest(new { Message = "Игра не началась" });
 
-            // Проверяем, может ли этот игрок стрелять сейчас
+
+
+            // Проверяем очередь хода
             bool isPlayer1Turn = game.Status == GameStatus.Player1Turn;
             if ((isPlayer1Turn && request.PlayerId != game.Player1Id) ||
                 (!isPlayer1Turn && request.PlayerId != game.Player2Id))
             {
-                Console.WriteLine($"❌ Не очередь игрока. Ход: {(isPlayer1Turn ? "Player1" : "Player2")}, Стреляет: {request.PlayerId}");
                 return BadRequest(new
                 {
                     Success = false,
                     Message = "Сейчас не ваш ход",
-                    Code = "NOT_YOUR_TURN"
+                    CurrentPlayer = isPlayer1Turn ? game.Player1Name : game.Player2Name
                 });
             }
 
             bool isPlayer1Shooting = request.PlayerId == game.Player1Id;
             Board targetBoard = isPlayer1Shooting ? game.Player2Board : game.Player1Board;
-            string targetPlayerNumber = isPlayer1Shooting ? "2" : "1";
 
-            Console.WriteLine($"🎯 Стреляет игрок {(isPlayer1Shooting ? "1" : "2")} в доску игрока {targetPlayerNumber}");
+            if (game.LastTurnTime.HasValue)
+            {
+                var timeSinceLastTurn = DateTime.UtcNow - game.LastTurnTime.Value;
+                if (timeSinceLastTurn > TimeSpan.FromSeconds(30))
+                {
+                    // Время истекло - передаем ход противнику
+                    game.Status = game.Status == GameStatus.Player1Turn
+                        ? GameStatus.Player2Turn
+                        : GameStatus.Player1Turn;
+                    game.CurrentPlayerId = game.Status == GameStatus.Player1Turn
+                        ? game.Player1Id
+                        : game.Player2Id;
+                    game.LastTurnTime = DateTime.UtcNow;
 
+                    await _firebaseService.UpdateGameAsync(game);
+
+                    return BadRequest(new
+                    {
+                        Success = false,
+                        Message = "Время хода истекло",
+                        TurnChanged = true,
+                        CurrentPlayerId = game.CurrentPlayerId
+                    });
+                }
+            }
+
+            // Проверяем что клетка еще не обстреляна
             var cell = targetBoard.GetCell(request.X, request.Y);
             if (cell != null && cell.WasShot)
             {
-                Console.WriteLine($"❌ Уже стреляли в клетку ({request.X},{request.Y})!");
                 return BadRequest(new
                 {
                     Success = false,
-                    Message = "Вы уже стреляли в эту клетку!",
-                    Code = "ALREADY_SHOT",
-                    Status = cell.Status.ToString()
+                    Message = "Вы уже стреляли в эту клетку",
+                    CellStatus = cell.Status.ToString()
                 });
             }
 
-            // Используем новый метод с деталями
+            // Проверяем попадание
             var (isHit, isShipSunk, sunkShip) = _gameService.CheckHitWithDetails(targetBoard, request.X, request.Y);
 
-            Console.WriteLine($"🎯 Результат: isHit={isHit}, isShipSunk={isShipSunk}");
-
-            if (sunkShip != null)
-            {
-                Console.WriteLine($"💥 Потоплен корабль: {sunkShip.Name} ({sunkShip.Size} клеток)");
-            }
-
-            await _firebaseService.SaveShotAsync(id, request.PlayerId, request.X, request.Y, isHit);
-            await _firebaseService.UpdateBoardAsync(id, targetPlayerNumber, targetBoard);
+            // Сохраняем выстрел
+            await _firebaseService.SaveShotAsync(id, request.PlayerId, request.X, request.Y, isHit, isShipSunk);
+            await _firebaseService.UpdateBoardAsync(id, isPlayer1Shooting ? "player2" : "player1", targetBoard);
 
             bool isGameOver = _gameService.IsGameOver(targetBoard);
 
-            // ИСПРАВЛЕНО: Правильная логика смены хода по правилам морского боя
-            if (!isGameOver)
+            // 1. Если игра окончена - фиксируем победу
+            // 2. Если попал (даже если потопил корабль) - продолжает ходить
+            // 3. Если промахнулся - ход переходит противнику
+
+            if (isGameOver)
+            {
+                // КОНЕЦ ИГРЫ
+                game.Status = request.PlayerId == game.Player1Id
+                    ? GameStatus.Player1Won
+                    : GameStatus.Player2Won;
+                game.WinnerId = request.PlayerId;
+                game.LoserId = request.PlayerId == game.Player1Id ? game.Player2Id : game.Player1Id;
+                game.EndedAt = DateTime.UtcNow;
+
+                _logger.LogInformation($"🏆 Игра окончена! Победил: {request.PlayerId}");
+            }
+            else
             {
                 if (isHit)
                 {
-                    // ПОПАДАНИЕ (даже если потопил корабль) - продолжает ходить
-                    Console.WriteLine($"🎯 ПОПАДАНИЕ! Игрок продолжает ход.");
-                    // Статус игры НЕ меняем, CurrentPlayerId НЕ меняем
+                    // 🔥 ПОПАЛ - продолжает ходить (НЕ МЕНЯЕМ ИГРОКА)
+                    _logger.LogInformation($"🎯 Попадание! Игрок {request.PlayerId} продолжает ход");
+
+                    if (isShipSunk)
+                    {
+                        _logger.LogInformation($"💥 Потоплен {sunkShip?.Name}!");
+
+                        // Помечаем клетки вокруг потопленного корабля как промахи
+                        _gameService.MarkCellsAroundSunkShip(targetBoard, sunkShip);
+                    }
                 }
                 else
                 {
-                    // ПРОМАХ - меняем ход
+                    // 🔥 ПРОМАХ - меняем игрока
                     game.Status = game.Status == GameStatus.Player1Turn
                         ? GameStatus.Player2Turn
                         : GameStatus.Player1Turn;
@@ -424,110 +361,93 @@ namespace BattleShip.Server.Controllers
                         ? game.Player1Id
                         : game.Player2Id;
 
-                    Console.WriteLine($"🔄 ПРОМАХ! Смена хода. Новый статус: {game.Status}");
+                    _logger.LogInformation($"🔄 Промах! Ход переходит к {game.CurrentPlayerId}");
                 }
             }
-            else
-            {
-                // КОНЕЦ ИГРЫ
-                game.Status = request.PlayerId == game.Player1Id
-                    ? GameStatus.Player1Won
-                    : GameStatus.Player2Won;
-                Console.WriteLine($"🏆 ПОБЕДА! Победитель: {game.Status}");
-            }
+
+            game.LastTurnTime = DateTime.UtcNow;
+            await _firebaseService.UpdateGameAsync(game);
 
             await _firebaseService.UpdateGameAsync(game);
-            Console.WriteLine($"✅ Игра обновлена в Firebase");
 
-            // ИСПРАВЛЕНО: NextPlayer теперь всегда "player" при попадании, "opponent" при промахе
-            string nextPlayer = "unknown";
-            if (isGameOver)
-            {
-                nextPlayer = "game_over";
-            }
-            else if (isHit)
-            {
-                nextPlayer = "same_player"; // Тот же игрок продолжает
-            }
-            else
-            {
-                nextPlayer = game.Status == GameStatus.Player1Turn ? "player1" : "player2";
-            }
-
-            // Добавляем всю информацию для клиента
             return Ok(new
             {
                 Success = true,
                 IsHit = isHit,
                 IsShipSunk = isShipSunk,
-                ShipSize = sunkShip?.Size ?? 0,
                 ShipName = sunkShip?.Name ?? "",
-                CellStatus = cell?.Status.ToString() ?? "Empty", // "Hit", "Miss", "Sunk"
+                ShipSize = sunkShip?.Size ?? 0,
                 IsGameOver = isGameOver,
                 GameStatus = game.Status.ToString(),
                 CurrentPlayerId = game.CurrentPlayerId,
-                NextPlayer = nextPlayer, // ИСПРАВЛЕНО: понятное значение
-                Message = isShipSunk ?
-                    $"Потоплен корабль {sunkShip?.Name}!" :
-                    (isHit ? "Попадание!" : "Мимо!")
+                CurrentPlayerName = game.CurrentPlayerId == game.Player1Id
+                    ? game.Player1Name
+                    : game.Player2Name,
+                ContinueTurn = isHit, // true если игрок продолжает ход
+                Message = isGameOver ? "Игра окончена!" :
+                         isShipSunk ? $"Потоплен {sunkShip?.Name}!" :
+                         isHit ? "Попадание!" : "Мимо!"
             });
         }
 
-        [HttpGet("{id}/wait")]
-        public async Task<IActionResult> WaitForGame(string id, [FromQuery] string playerId)
+        // Проверка статуса игры (для постоянного опроса с клиента)
+        [HttpGet("{gameId}/status/{playerId}")]
+        public async Task<IActionResult> GetGameStatus(string gameId, string playerId)
         {
-            Console.WriteLine($"⏳ Ожидание игры {id} для игрока {playerId}");
+            var game = await _firebaseService.GetGameAsync(gameId);
+            if (game == null)
+                return NotFound(new { Message = "Игра не найдена" });
 
-            int maxAttempts = 30; // 30 * 2 секунды = 1 минута
-            for (int i = 0; i < maxAttempts; i++)
+            if (playerId != game.Player1Id && playerId != game.Player2Id)
+                return Unauthorized(new { Message = "Вы не участник этой игры" });
+
+            bool isPlayer1 = playerId == game.Player1Id;
+            bool isMyTurn = game.CurrentPlayerId == playerId;
+
+            // Проверяем не вышел ли противник
+            var opponentLeft = await _firebaseService.HasOpponentLeft(gameId, playerId);
+
+            if (opponentLeft)
             {
-                var game = await _firebaseService.GetGameAsync(id);
+                // Противник вышел - присваиваем победу
+                game.Status = playerId == game.Player1Id
+                    ? GameStatus.Player1Won
+                    : GameStatus.Player2Won;
+                game.WinnerId = playerId;
+                game.LoserId = playerId == game.Player1Id ? game.Player2Id : game.Player1Id;
+                game.EndedAt = DateTime.UtcNow;
+                game.OpponentDisconnected = true;
 
-                if (game == null)
-                    return NotFound(new { Message = "Игра не найдена" });
-
-                // Проверяем статус
-                if (game.Status == GameStatus.Player1Turn || game.Status == GameStatus.Player2Turn)
-                {
-                    // Игра началась!
-                    return Ok(new
-                    {
-                        GameStarted = true,
-                        GameStatus = game.Status.ToString(),
-                        CurrentPlayerId = game.CurrentPlayerId,
-                        Message = "Игра началась!"
-                    });
-                }
-
-                // Проверяем присоединился ли второй игрок
-                if (game.Status == GameStatus.PlacingShips && !string.IsNullOrEmpty(game.Player2Id))
-                {
-                    return Ok(new
-                    {
-                        GameStarted = false,
-                        GameStatus = game.Status.ToString(),
-                        Player1Id = game.Player1Id,
-                        Player2Id = game.Player2Id,
-                        Message = "Второй игрок присоединился. Расставляйте корабли!"
-                    });
-                }
-
-                await Task.Delay(2000); // Ждем 2 секунды
-                Console.WriteLine($"   Попытка {i + 1}/{maxAttempts}...");
+                await _firebaseService.UpdateGameAsync(game);
             }
 
             return Ok(new
             {
-                GameStarted = false,
-                Timeout = true,
-                Message = "Время ожидания истекло"
+                GameId = gameId,
+                GameStatus = game.Status.ToString(),
+                IsMyTurn = isMyTurn,
+                IsGameOver = game.Status == GameStatus.Player1Won ||
+                            game.Status == GameStatus.Player2Won,
+                WinnerId = game.WinnerId,
+                PlayerId = playerId,
+                OpponentName = isPlayer1 ? game.Player2Name : game.Player1Name,
+                OpponentLeft = opponentLeft,
+                MyBoardShipsRemaining = isPlayer1
+                    ? game.Player1Board.Ships.Count(s => !s.IsSunk)
+                    : game.Player2Board.Ships.Count(s => !s.IsSunk),
+                OpponentBoardShipsRemaining = isPlayer1
+                    ? game.Player2Board.Ships.Count(s => !s.IsSunk)
+                    : game.Player1Board.Ships.Count(s => !s.IsSunk),
+                Message = opponentLeft ? "Противник вышел из игры. Вы победили!" :
+                         isMyTurn ? "Ваш ход!" : "Ход противника..."
             });
         }
 
-        [HttpGet("{id}/player/{playerId}")]
-        public async Task<IActionResult> GetPlayerView(string id, string playerId)
+        // Получение состояния доски (с скрытием неотстрелянных клеток противника)
+        [HttpGet("{gameId}/board/{playerId}")]
+        public async Task<IActionResult> GetBoard(string gameId, string playerId)
         {
-            var game = await _firebaseService.GetGameAsync(id);
+            var game = await _firebaseService.GetGameAsync(gameId);
             if (game == null)
                 return NotFound(new { Message = "Игра не найдена" });
 
@@ -539,35 +459,40 @@ namespace BattleShip.Server.Controllers
             var myBoard = isPlayer1 ? game.Player1Board : game.Player2Board;
             var opponentBoard = isPlayer1 ? game.Player2Board : game.Player1Board;
 
-            // Создаем скрытое представление доски противника
-            var hiddenOpponentCells = new List<object>();
+            // Создаем безопасное представление доски противника
+            var safeOpponentCells = new List<object>();
             foreach (var cell in opponentBoard.Cells)
             {
-                hiddenOpponentCells.Add(new
+                // Показываем только отстрелянные клетки
+                if (cell.WasShot)
                 {
-                    cell.X,
-                    cell.Y,
-                    cell.WasShot,
-                    Status = cell.WasShot ? cell.Status : CellStatus.Empty,
-                    // Можно показать потопленные корабли
-                    ShowSunk = cell.WasShot && cell.HasShip &&
-                              opponentBoard.Ships.Any(s =>
-                                  s.CellCoordinates.Contains($"{cell.X},{cell.Y}") && s.IsSunk)
-                });
+                    safeOpponentCells.Add(new
+                    {
+                        cell.X,
+                        cell.Y,
+                        cell.Status,
+                        WasShot = true,
+                        HasShip = cell.Status == CellStatus.Hit || cell.Status == CellStatus.Sunk,
+                        IsSunk = cell.Status == CellStatus.Sunk
+                    });
+                }
+                else
+                {
+                    // Неотстрелянные клетки скрываем
+                    safeOpponentCells.Add(new
+                    {
+                        cell.X,
+                        cell.Y,
+                        Status = CellStatus.Empty,
+                        WasShot = false,
+                        HasShip = false,
+                        IsSunk = false
+                    });
+                }
             }
 
             return Ok(new
             {
-                GameId = id,
-                GameStatus = game.Status.ToString(),
-                IsMyTurn = game.CurrentPlayerId == playerId,
-                MyPlayerId = playerId,
-                OpponentId = isPlayer1 ? game.Player2Id : game.Player1Id,
-                Player1Ready = game.Player1Ready,
-                Player2Ready = game.Player2Ready,
-                WaitingFor = game.Player1Ready ? "Player2" : "Player1",
-
-                // Моя доска
                 MyBoard = new
                 {
                     Cells = myBoard.Cells.Select(c => new
@@ -577,52 +502,46 @@ namespace BattleShip.Server.Controllers
                         c.HasShip,
                         c.WasShot,
                         c.Status,
-                        //  Показываем потопленные корабли
-                        IsSunkShip = c.HasShip && myBoard.Ships.Any(s =>
-                            s.CellCoordinates.Contains($"{c.X},{c.Y}") && s.IsSunk)
+                        IsSunk = c.Status == CellStatus.Sunk
                     }),
                     Ships = myBoard.Ships.Select(s => new
                     {
                         s.Name,
                         s.Size,
                         s.IsSunk,
-                        Hits = s.Hits,
-                        Cells = s.CellCoordinates
+                        s.Hits,
+                        Remaining = s.Size - s.Hits
                     })
                 },
-
-                // Доска противника
                 OpponentBoard = new
                 {
-                    Cells = hiddenOpponentCells,
+                    Cells = safeOpponentCells,
                     ShipsSunk = opponentBoard.Ships.Count(s => s.IsSunk),
-                    ShipsRemaining = opponentBoard.Ships.Count(s => !s.IsSunk),
-                    // Дополнительная информация о потопленных кораблях
-                    SunkShips = opponentBoard.Ships.Where(s => s.IsSunk)
-                        .Select(s => new { s.Name, s.Size })
+                    ShipsRemaining = opponentBoard.Ships.Count(s => !s.IsSunk)
                 }
+            });
+        }
+
+        [HttpGet("test")]
+        public IActionResult Test()
+        {
+            return Ok(new
+            {
+                Message = "BattleShip Server работает!",
+                Timestamp = DateTime.UtcNow,
+                Version = "1.0",
+                Status = "OK"
             });
         }
     }
 
-    public class SimpleReadyRequest
+    public class ReadyForMatchmakingRequest
     {
-        public string PlayerId { get; set; }
+        public string PlayerName { get; set; }
         public List<Ship> Ships { get; set; }
     }
 
-    public class PlayerReadyRequest
-    {
-        public string PlayerId { get; set; }
-        public List<Ship> Ships { get; set; } // Корабли от фронтенда
-    }
-
-    public class FindGameRequest
-    {
-        public string PlayerName { get; set; }
-    }
-
-    public class PlaceShipsRequest
+    public class SurrenderRequest
     {
         public string PlayerId { get; set; }
     }
@@ -632,11 +551,5 @@ namespace BattleShip.Server.Controllers
         public int X { get; set; }
         public int Y { get; set; }
         public string PlayerId { get; set; }
-    }
-
-    public class PlaceShipsManualRequest
-    {
-        public string PlayerId { get; set; }
-        public List<Ship> Ships { get; set; }
     }
 }

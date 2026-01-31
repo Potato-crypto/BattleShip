@@ -4,7 +4,7 @@ using BattleShip.Server.Services;
 
 namespace BattleShip.Server.Controllers
 {
-    [ApiController]
+    /*[ApiController]
     [Route("api/[controller]")]
     public class ChatController : ControllerBase
     {
@@ -48,5 +48,5 @@ namespace BattleShip.Server.Controllers
                 return StatusCode(500, new { Message = "Ошибка сохранения" });
             }
         }
-    }
+    }*/
 }

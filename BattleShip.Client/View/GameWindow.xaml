@@ -7,7 +7,7 @@
         Width="1000"
         WindowStartupLocation="CenterScreen"
         Background="#0c2461">
-    
+
     <Grid>
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto"/>
@@ -123,7 +123,7 @@
                         <StackPanel Margin="10" 
                                     VerticalAlignment="Center"
                                     HorizontalAlignment="Center">
-                            
+
                             <!-- Кнопка очистки поля -->
                             <Button x:Name="ClearBoardButton"
                                     Content="🗑️ Очистить поле"
@@ -143,7 +143,7 @@
                                     </Style>
                                 </Button.Resources>
                             </Button>
-        
+
                             <!-- Информация о кораблях -->
                             <TextBlock x:Name="ShipsInfo"
                                        Text="Осталось расставить: 1x4, 2x3, 3x2, 4x1"
@@ -151,7 +151,7 @@
                                        FontSize="12"
                                        HorizontalAlignment="Center"
                                        Margin="0,0,0,5"/>
-        
+
                             <!-- Кнопка случайной расстановки -->
                             <Button x:Name="RandomPlacementButton"
                                     Content="🎲 Расставить случайно"
@@ -228,7 +228,7 @@
                         <StackPanel Margin="10" 
                                     VerticalAlignment="Center"
                                     HorizontalAlignment="Center">
-                            
+
                             <!-- Кнопка "Играть с другом" -->
                             <Button x:Name="PlayWithFriendButton"
                                     Content="🎮 Играть с другом"
@@ -299,14 +299,14 @@
                                                   HorizontalAlignment="Center"
                                                   VerticalAlignment="Center"/>
                                     </Grid>
-                                    
+
                                     <TextBlock x:Name="SearchStatus"
                                               Text="Поиск соперника..."
                                               Foreground="White"
                                               FontSize="12"
                                               HorizontalAlignment="Center"
                                               Margin="0,0,0,5"/>
-                                    
+
                                     <Button x:Name="CancelSearchButton"
                                             Content="Отменить поиск"
                                             Width="120"
@@ -332,71 +332,97 @@
             </Border>
         </Grid>
 
-        <!-- Статус игры и кнопка чата внизу -->
-<!-- Статус игры и кнопка чата внизу -->
-<Border Grid.Row="2"
-        Background="#1e3c72"
-        Padding="10">
-    <Grid>
-        <Grid.ColumnDefinitions>
-            <ColumnDefinition Width="*"/>
-            <ColumnDefinition Width="Auto"/>
-        </Grid.ColumnDefinitions>
-        
-        <!-- Статус игры -->
-        <TextBlock x:Name="GameStatus"
-                  Text="Подготовка к игре - расставьте корабли на вашем поле"
-                  Foreground="White"
-                  FontSize="14"
-                  HorizontalAlignment="Center"
-                  Grid.Column="0"/>
-        
-        <!-- Кнопка открытия чата со счетчиком -->
-        <Button x:Name="OpenChatButton"
-                Width="100"
-                Height="30"
-                Background="#2ecc71"
-                Foreground="White"
-                BorderThickness="0"
-                FontSize="12"
-                FontWeight="Bold"
-                Cursor="Hand"
-                Visibility="Collapsed"
-                Click="OpenChatButton_Click"
-                Grid.Column="1"
-                Margin="10,0,0,0">
+        <!-- Статус игры, таймер и кнопка чата внизу -->
+        <Border Grid.Row="2"
+                Background="#1e3c72"
+                Padding="10">
             <Grid>
-                <TextBlock Text="💬 Чат" 
-                          VerticalAlignment="Center" 
-                          HorizontalAlignment="Center"/>
-                
-                <!-- Счетчик непрочитанных сообщений -->
-                <Border x:Name="UnreadBadge"
-                        Background="#e74c3c"
-                        CornerRadius="10"
-                        Width="20"
-                        Height="20"
-                        HorizontalAlignment="Right"
-                        VerticalAlignment="Top"
-                        Margin="0,-5,-5,0"
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="Auto"/>
+                    <!-- ✅ ТАЙМЕР -->
+                    <ColumnDefinition Width="*"/>
+                    <!-- ✅ СТАТУС -->
+                    <ColumnDefinition Width="Auto"/>
+                    <!-- ✅ КНОПКА ЧАТА -->
+                </Grid.ColumnDefinitions>
+
+                <!-- ✅ ТАЙМЕР ХОДА (новый элемент) -->
+                <Border Grid.Column="0"
+                        x:Name="TurnTimerContainer"
+                        Background="#4a69bd"
+                        CornerRadius="15"
+                        Padding="10,5"
+                        Margin="10,0"
                         Visibility="Collapsed">
-                    <TextBlock x:Name="UnreadCountText"
-                              Text="0"
-                              Foreground="White"
-                              FontSize="10"
-                              FontWeight="Bold"
-                              HorizontalAlignment="Center"
-                              VerticalAlignment="Center"/>
+                    <StackPanel Orientation="Horizontal">
+                        <TextBlock Text="⏱️"
+                                  Foreground="White"
+                                  FontSize="16"
+                                  Margin="0,0,5,0"
+                                  VerticalAlignment="Center"/>
+                        <TextBlock x:Name="TurnTimeTextBlock"
+                                  Text="Ход: 30 сек"
+                                  Foreground="White"
+                                  FontSize="12"
+                                  FontWeight="Bold"
+                                  VerticalAlignment="Center"/>
+                    </StackPanel>
                 </Border>
+
+                <!-- Статус игры -->
+                <TextBlock x:Name="GameStatus"
+                          Text="Подготовка к игре - расставьте корабли на вашем поле"
+                          Foreground="White"
+                          FontSize="14"
+                          HorizontalAlignment="Center"
+                          Grid.Column="1"/>
+
+                <!-- Кнопка открытия чата со счетчиком -->
+                <Button x:Name="OpenChatButton"
+                        Width="100"
+                        Height="30"
+                        Background="#2ecc71"
+                        Foreground="White"
+                        BorderThickness="0"
+                        FontSize="12"
+                        FontWeight="Bold"
+                        Cursor="Hand"
+                        Visibility="Collapsed"
+                        Click="OpenChatButton_Click"
+                        Grid.Column="2"
+                        Margin="10,0,0,0">
+                    <Grid>
+                        <TextBlock Text="💬 Чат" 
+                                  VerticalAlignment="Center" 
+                                  HorizontalAlignment="Center"/>
+
+                        <!-- Счетчик непрочитанных сообщений -->
+                        <Border x:Name="UnreadBadge"
+                                Background="#e74c3c"
+                                CornerRadius="10"
+                                Width="20"
+                                Height="20"
+                                HorizontalAlignment="Right"
+                                VerticalAlignment="Top"
+                                Margin="0,-5,-5,0"
+                                Visibility="Collapsed">
+                            <TextBlock x:Name="UnreadCountText"
+                                      Text="0"
+                                      Foreground="White"
+                                      FontSize="10"
+                                      FontWeight="Bold"
+                                      HorizontalAlignment="Center"
+                                      VerticalAlignment="Center"/>
+                        </Border>
+                    </Grid>
+                    <Button.Resources>
+                        <Style TargetType="Border">
+                            <Setter Property="CornerRadius" Value="5"/>
+                        </Style>
+                    </Button.Resources>
+                </Button>
             </Grid>
-            <Button.Resources>
-                <Style TargetType="Border">
-                    <Setter Property="CornerRadius" Value="5"/>
-                </Style>
-            </Button.Resources>
-        </Button>
-    </Grid>
-</Border>
+        </Border>
 
         <!-- Окно чата (в правом нижнем углу) -->
         <local:ChatControl x:Name="ChatWindowControl"

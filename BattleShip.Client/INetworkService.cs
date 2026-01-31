@@ -40,8 +40,10 @@ namespace BattleShip.Client
         // Чат
         Task SendChatMessageAsync(string message);
         // Удаляем дублирующее событие OnChatMessageReceived
-        
+
         // Статистика
+
+        void SetShipsCallback(Func<List<ShipData>> getShipsCallback);
         Task<PlayerStats> GetPlayerStatsAsync();
 
         public class ChatMessage

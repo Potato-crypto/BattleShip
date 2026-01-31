@@ -7,6 +7,7 @@ namespace BattleShip.Client
 {
     public class GameLogic
     {
+        // Упрощенный класс корабля - только для расстановки
         public class Ship
         {
             public int Size { get; set; }
@@ -14,16 +15,16 @@ namespace BattleShip.Client
             public bool IsPlaced { get; set; }
             public bool IsHorizontal { get; set; } = true;
             public (int row, int col)? StartPosition { get; set; }
-            public int Hits { get; set; }
-            public bool IsSunk => Hits >= Size && Size > 0;
         }
 
+        // Только для визуализации расстановки
         private bool[,] _playerBoard;
-        public System.Collections.Generic.List<Ship> PlayerShips { get; private set; }
+        public List<Ship> PlayerShips { get; private set; }
         public bool AllShipsPlaced { get; private set; }
         private Random _random = new Random();
 
-        private readonly System.Collections.Generic.List<int> _requiredShips = new System.Collections.Generic.List<int> { 4, 3, 3, 2, 2, 2, 1, 1, 1, 1 };
+        //  Набор кораблей для расстановки
+        private readonly List<int> _requiredShips = new List<int> { 4, 3, 3, 2, 2, 2, 1, 1, 1, 1 };
         private int _currentShipIndex = 0;
         private Ship _currentShipBeingPlaced = null;
         private bool _isPlacingShip = false;
@@ -35,6 +36,7 @@ namespace BattleShip.Client
             InitializeShips();
         }
 
+        // Инициализация только кораблей для расстановки
         private void InitializeShips()
         {
             PlayerShips.Clear();
@@ -46,33 +48,22 @@ namespace BattleShip.Client
             _isPlacingShip = false;
         }
 
-        public Ship GetShipAt(int row, int col)
+        // Метод для получения данных кораблей для отправки на сервер
+        public List<ShipData> GetShipsForServer()
         {
-            return PlayerShips.FirstOrDefault(ship =>
-                ship.Cells.Any(c => c.row == row && c.col == col));
-        }
-
-        public void RegisterHit(int row, int col)
-        {
-            var ship = GetShipAt(row, col);
-            if (ship != null)
+            return PlayerShips.Where(s => s.IsPlaced).Select(ship => new ShipData
             {
-                ship.Hits++;
-            }
+                Size = ship.Size,
+                Cells = ship.Cells.Select(c => new CellData
+                {
+                    Row = c.row,
+                    Col = c.col
+                }).ToList(),
+                IsHorizontal = ship.IsHorizontal
+            }).ToList();
         }
 
-        public bool IsShipSunk(int row, int col)
-        {
-            var ship = GetShipAt(row, col);
-            return ship?.IsSunk ?? false;
-        }
-
-        public List<(int row, int col)> GetShipCells(int row, int col)
-        {
-            var ship = GetShipAt(row, col);
-            return ship?.Cells ?? new List<(int row, int col)>();
-        }
-
+        // Только получение текущего корабля для расстановки
         public Ship GetCurrentShip()
         {
             if (_currentShipIndex < PlayerShips.Count)
@@ -80,6 +71,7 @@ namespace BattleShip.Client
             return null;
         }
 
+        // Попытка разместить клетку корабля (только расстановка)
         public bool TryPlaceShipCell(int row, int col)
         {
             var currentShip = GetCurrentShip();
@@ -112,10 +104,10 @@ namespace BattleShip.Client
             currentShip.Cells.Add((row, col));
             currentShip.IsPlaced = true;
             _playerBoard[row, col] = true;
-            
+
             _currentShipIndex++;
             CheckAllShipsPlaced();
-            
+
             return true;
         }
 
@@ -146,7 +138,7 @@ namespace BattleShip.Client
 
             // Получаем начальную позицию
             var startPos = _currentShipBeingPlaced.StartPosition.Value;
-            
+
             // Определяем направление по первой и второй клетке
             if (_currentShipBeingPlaced.Cells.Count == 1)
             {
@@ -248,14 +240,15 @@ namespace BattleShip.Client
             return true;
         }
 
+        // Проверка возможности размещения клетки
         private bool CanPlaceCell(int row, int col, bool skipSelfCheck = false)
         {
             if (row < 0 || row >= 10 || col < 0 || col >= 10)
                 return false;
-            
+
             if (!skipSelfCheck && _playerBoard[row, col])
                 return false;
-            
+
             // Проверяем соседние клетки (включая диагонали)
             for (int i = -1; i <= 1; i++)
             {
@@ -263,41 +256,42 @@ namespace BattleShip.Client
                 {
                     int checkRow = row + i;
                     int checkCol = col + j;
-                    
+
                     if (checkRow >= 0 && checkRow < 10 && checkCol >= 0 && checkCol < 10)
                     {
                         if (skipSelfCheck && i == 0 && j == 0)
                             continue;
-                            
+
                         if (_playerBoard[checkRow, checkCol])
                             return false;
                     }
                 }
             }
-            
+
             return true;
         }
 
+        // Случайная расстановка кораблей
         public void RandomlyPlaceShips()
         {
             ClearBoard();
-            
+
             foreach (var ship in PlayerShips)
             {
                 bool placed = false;
                 int attempts = 0;
-                
+
                 while (!placed && attempts < 100)
                 {
                     attempts++;
-                    
+
                     bool horizontal = _random.Next(0, 2) == 0;
-                    
+
                     if (horizontal)
                     {
                         int row = _random.Next(0, 10);
                         int col = _random.Next(0, 11 - ship.Size);
-                        
+
                         bool canPlace = true;
                         for (int i = 0; i < ship.Size; i++)
                         {
@@ -307,7 +301,7 @@ namespace BattleShip.Client
                                 break;
                             }
                         }
-                        
+
                         if (canPlace)
                         {
                             ship.Cells.Clear();
@@ -325,7 +319,7 @@ namespace BattleShip.Client
                     {
                         int row = _random.Next(0, 11 - ship.Size);
                         int col = _random.Next(0, 10);
-                        
+
                         bool canPlace = true;
                         for (int i = 0; i < ship.Size; i++)
                         {
@@ -335,7 +329,7 @@ namespace BattleShip.Client
                                 break;
                             }
                         }
-                        
+
                         if (canPlace)
                         {
                             ship.Cells.Clear();
@@ -350,36 +344,38 @@ namespace BattleShip.Client
                         }
                     }
                 }
-                
+
                 if (!placed)
                 {
                     RandomlyPlaceShips();
                     return;
                 }
             }
-            
+
             _currentShipIndex = PlayerShips.Count;
             CheckAllShipsPlaced();
         }
 
+        // Очистка доски
         public void ClearBoard()
         {
             for (int i = 0; i < 10; i++)
                 for (int j = 0; j < 10; j++)
                     _playerBoard[i, j] = false;
-            
+
             foreach (var ship in PlayerShips)
             {
                 ship.Cells.Clear();
                 ship.IsPlaced = false;
             }
-            
+
             _currentShipIndex = 0;
             _currentShipBeingPlaced = null;
             _isPlacingShip = false;
             AllShipsPlaced = false;
         }
 
+        // Удаление последней клетки при расстановке
         public void RemoveLastCell()
         {
             if (_isPlacingShip && _currentShipBeingPlaced != null)
@@ -387,7 +383,7 @@ namespace BattleShip.Client
                 if (_currentShipBeingPlaced.Cells.Count > 0)
                 {
                     _currentShipBeingPlaced.Cells.RemoveAt(_currentShipBeingPlaced.Cells.Count - 1);
-                    
+
                     if (_currentShipBeingPlaced.Cells.Count == 0)
                     {
                         _currentShipBeingPlaced = null;
@@ -404,7 +400,7 @@ namespace BattleShip.Client
                     {
                         _playerBoard[cell.row, cell.col] = false;
                     }
-                    
+
                     lastShip.Cells.Clear();
                     lastShip.IsPlaced = false;
                     _currentShipIndex--;
@@ -413,16 +409,18 @@ namespace BattleShip.Client
             }
         }
 
+        // Проверка что все корабли расставлены
         private void CheckAllShipsPlaced()
         {
-            AllShipsPlaced = _currentShipIndex >= PlayerShips.Count && 
+            AllShipsPlaced = _currentShipIndex >= PlayerShips.Count &&
                            PlayerShips.All(s => s.IsPlaced);
         }
 
+        // Получение всех клеток кораблей (для отрисовки)
         public List<(int row, int col)> GetPlayerShipCells()
         {
             var cells = new List<(int row, int col)>();
-            
+
             foreach (var ship in PlayerShips)
             {
                 if (ship.IsPlaced)
@@ -430,10 +428,11 @@ namespace BattleShip.Client
                     cells.AddRange(ship.Cells);
                 }
             }
-            
+
             return cells;
         }
 
+        // Получение клеток текущего размещаемого корабля
         public List<(int row, int col)> GetCurrentShipBeingPlacedCells()
         {
             if (_currentShipBeingPlaced != null)
@@ -443,6 +442,7 @@ namespace BattleShip.Client
             return new List<(int row, int col)>();
         }
 
+        // Информация о текущем корабле для UI
         public string GetCurrentShipInfo()
         {
             if (_isPlacingShip && _currentShipBeingPlaced != null)
@@ -453,7 +453,7 @@ namespace BattleShip.Client
                     return $"Корабль {currentShip.Size} клетки - поставлено {_currentShipBeingPlaced.Cells.Count}/{currentShip.Size} (ПКМ - отменить)";
                 }
             }
-            
+
             var ship = GetCurrentShip();
             if (ship != null && !ship.IsPlaced)
             {
@@ -462,19 +462,28 @@ namespace BattleShip.Client
                 else
                     return $"Нажмите на первую клетку для корабля размером {ship.Size} клетки";
             }
-            
+
             return "Все корабли размещены";
         }
 
+        // Проверка находится ли игрок в процессе расстановки
         public bool IsPlacingShip()
         {
             return _isPlacingShip;
         }
 
+        // Отмена текущей расстановки корабля
         public void CancelCurrentShipPlacement()
         {
             _currentShipBeingPlaced = null;
             _isPlacingShip = false;
+        }
+
+        // Сброс для новой игры
+        public void ResetForNewGame()
+        {
+            ClearBoard();
+            InitializeShips();
         }
     }
 }

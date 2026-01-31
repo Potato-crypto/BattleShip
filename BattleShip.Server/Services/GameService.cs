@@ -5,6 +5,15 @@ namespace BattleShip.Server.Services
 {
     public class GameService
     {
+
+        private readonly ILogger<GameService> _logger;
+
+        public GameService(ILogger<GameService> logger)
+        {
+            _logger = logger;
+        }
+
+
         public (bool isHit, bool isShipSunk, Ship sunkShip) CheckHitWithDetails(Board board, int x, int y)
         {
             Console.WriteLine($"🎯 CheckHitWithDetails в ({x},{y})");
@@ -117,20 +126,20 @@ namespace BattleShip.Server.Services
         }
 
         // Помечает клетки вокруг потопленного корабля
-        private void MarkCellsAroundSunkShip(Board board, Ship ship)
+        public void MarkCellsAroundSunkShip(Board board, Ship sunkShip)
         {
-            if (ship.CellCoordinates == null) return;
+            if (sunkShip?.CellCoordinates == null) return;
 
-            Console.WriteLine($"🎯 Помечаем клетки вокруг потопленного корабля '{ship.Name}'");
+            _logger.LogInformation($"🎯 Помечаем клетки вокруг потопленного {sunkShip.Name}");
 
-            foreach (var coord in ship.CellCoordinates)
+            foreach (var coord in sunkShip.CellCoordinates)
             {
                 var parts = coord.Split(',');
                 if (parts.Length == 2 &&
                     int.TryParse(parts[0], out int x) &&
                     int.TryParse(parts[1], out int y))
                 {
-                    // Проверяем все 8 направлений вокруг клетки
+                    // Проверяем все 8 направлений вокруг клетки корабля
                     for (int dx = -1; dx <= 1; dx++)
                     {
                         for (int dy = -1; dy <= 1; dy++)
@@ -147,22 +156,16 @@ namespace BattleShip.Server.Services
                                 var neighborCell = board.GetCell(nx, ny);
                                 if (neighborCell != null && !neighborCell.WasShot)
                                 {
-                                    // Помечаем как промах (даже если там есть корабль!)
+                                    // Помечаем как промах
                                     neighborCell.WasShot = true;
                                     neighborCell.Status = CellStatus.Miss;
-                                    Console.WriteLine($"   Клетка вокруг ({nx},{ny}) помечена как Miss");
+                                    _logger.LogDebug($"   Клетка ({nx},{ny}) помечена как Miss");
                                 }
                             }
                         }
                     }
                 }
             }
-        }
-
-        public bool CheckHit(Board board, int x, int y)
-        {
-            var (isHit, _, _) = CheckHitWithDetails(board, x, y);
-            return isHit;
         }
 
         public bool IsGameOver(Board board)

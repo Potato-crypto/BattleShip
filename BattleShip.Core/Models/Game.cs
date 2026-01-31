@@ -1,5 +1,6 @@
-﻿using System.Text.Json.Serialization;
+﻿// В Game.cs добавьте:
 using BattleShip.Core.Enums;
+using System.Text.Json.Serialization;
 
 namespace BattleShip.Core.Models
 {
@@ -14,11 +15,23 @@ namespace BattleShip.Core.Models
         [JsonPropertyName("player2Id")]
         public string Player2Id { get; set; }
 
+        [JsonPropertyName("player1Name")]
+        public string Player1Name { get; set; }
+
+        [JsonPropertyName("player2Name")]
+        public string Player2Name { get; set; }
+
         [JsonPropertyName("status")]
         public GameStatus Status { get; set; }
 
         [JsonPropertyName("createdAt")]
         public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
+
+        [JsonPropertyName("updatedAt")]
+        public DateTime? UpdatedAt { get; set; }
+
+        [JsonPropertyName("endedAt")]
+        public DateTime? EndedAt { get; set; }
 
         [JsonPropertyName("player1Ready")]
         public bool Player1Ready { get; set; }
@@ -35,7 +48,20 @@ namespace BattleShip.Core.Models
         [JsonPropertyName("currentPlayerId")]
         public string CurrentPlayerId { get; set; }
 
-        [JsonPropertyName("turnTimeSeconds")]
-        public int TurnTimeSeconds { get; set; } = 30;
+        [JsonPropertyName("winnerId")]
+        public string WinnerId { get; set; }
+
+        [JsonPropertyName("loserId")]
+        public string LoserId { get; set; }
+
+        [JsonPropertyName("surrender")]
+        public bool Surrender { get; set; }
+
+        [JsonPropertyName("opponentDisconnected")]
+        public bool OpponentDisconnected { get; set; }
+
+        [JsonPropertyName("lastTurnTime")]
+        public DateTime? LastTurnTime { get; set; }
+
     }
 }

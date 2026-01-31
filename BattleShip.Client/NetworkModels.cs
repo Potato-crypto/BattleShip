@@ -85,6 +85,18 @@ namespace BattleShip.Client
     // Результат выстрела
     public class ShootResultMessage
     {
+        [JsonProperty("isGameOver")]
+        public bool IsGameOver { get; set; }
+
+        [JsonProperty("continueTurn")]
+        public bool ContinueTurn { get; set; }
+
+        [JsonProperty("gameStatus")]
+        public string GameStatus { get; set; }
+
+        [JsonProperty("currentPlayerId")]
+        public string CurrentPlayerId { get; set; }
+
         [JsonProperty("row")]
         public int Row { get; set; }
         

@@ -222,9 +222,14 @@ namespace BattleShip.Server.Services
                     game.Id = gameId;
                     _logger.LogDebug($"🔄 Загружена игра: {gameId} ({game.Status})");
 
-                    // Восстанавливаем связи
-                    game.Player1Board?.RestoreCellShipReferences();
-                    game.Player2Board?.RestoreCellShipReferences();
+                    // Вместо этого просто инициализируем если нужно
+                    game.Player1Board?.EnsureCellsInitialized();
+                    game.Player2Board?.EnsureCellsInitialized();
+
+                    // Только логируем состояние
+                    int p1ShotCount = game.Player1Board?.Cells?.Count(c => c.WasShot) ?? 0;
+                    int p2ShotCount = game.Player2Board?.Cells?.Count(c => c.WasShot) ?? 0;
+                    _logger.LogDebug($"🎯 Состояние доски: P1 отстреляно={p1ShotCount}, P2 отстреляно={p2ShotCount}");
                 }
                 else
                 {
@@ -241,35 +246,22 @@ namespace BattleShip.Server.Services
         }
 
         // Обновляем только измененные поля
+        // Обновляем игру с досками
         public async Task UpdateGameAsync(Game game)
         {
             if (_firebaseClient == null || string.IsNullOrEmpty(game.Id)) return;
 
             try
             {
-                // Вместо сохранения всей игры, обновляем только нужные поля
-                var updates = new Dictionary<string, object>
-                {
-                    ["Status"] = game.Status,
-                    ["CurrentPlayerId"] = game.CurrentPlayerId,
-                    ["Player1Ready"] = game.Player1Ready,
-                    ["Player2Ready"] = game.Player2Ready,
-                    ["UpdatedAt"] = DateTime.UtcNow
-                };
+                _logger.LogInformation($"💾 Обновление игры {game.Id} со всеми досками");
 
-                // Обновляем только если изменились
-                if (!string.IsNullOrEmpty(game.Player2Id))
-                {
-                    updates["Player2Id"] = game.Player2Id;
-                }
-
-                // Используем Patch для частичного обновления
+                // Обновляем всю игру
                 await _firebaseClient
                     .Child("games")
                     .Child(game.Id)
-                    .PatchAsync(updates);
+                    .PutAsync(game);
 
-                _logger.LogDebug($"💾 Обновлена игра: {game.Id} ({game.Status})");
+                _logger.LogDebug($"💾 Игра обновлена: {game.Id} ({game.Status})");
             }
             catch (Exception ex)
             {
@@ -534,26 +526,18 @@ namespace BattleShip.Server.Services
             }
         }
 
-        public async Task<string> AddToLobbyAsync(string playerName, Board board)
+        public async Task<string> AddToLobbyAsync(PlayerInLobby playerInLobby)
         {
             try
             {
-                var playerId = "player-" + Guid.NewGuid();
-
-                var playerData = new PlayerInLobby
-                {
-                    PlayerId = playerId,
-                    PlayerName = playerName,
-                    Board = board,
-                    JoinedAt = DateTime.UtcNow
-                };
+                var playerId = playerInLobby.PlayerId;
 
                 await _firebaseClient
                     .Child("lobby")
                     .Child(playerId)
-                    .PutAsync(playerData);
+                    .PutAsync(playerInLobby);
 
-                _logger.LogInformation($"✅ Игрок {playerName} добавлен в лобби");
+                _logger.LogInformation($"✅ Игрок {playerInLobby.PlayerName} добавлен в лобби");
                 return playerId;
             }
             catch (Exception ex)
@@ -660,6 +644,167 @@ namespace BattleShip.Server.Services
 
             // Если игра не обновлялась 30 секунд - считаем что противник вышел
             return timeSinceUpdate > TimeSpan.FromSeconds(30);
+        }
+
+
+        public async Task<PlayerInLobby> FindAndRemoveOpponentAsync(string currentPlayerName)
+        {
+            try
+            {
+                // Получаем всех в лобби
+                var lobbyPlayers = await _firebaseClient
+                    .Child("lobby")
+                    .OnceAsync<PlayerInLobby>();
+
+                var opponent = lobbyPlayers
+                    .Where(p => p.Object.PlayerName != currentPlayerName)
+                    .OrderBy(p => p.Object.JoinedAt)
+                    .Select(p => new { Key = p.Key, Player = p.Object })
+                    .FirstOrDefault();
+
+                if (opponent != null)
+                {
+                    // Атомарно удаляем из лобби
+                    await _firebaseClient
+                        .Child("lobby")
+                        .Child(opponent.Key)
+                        .DeleteAsync();
+
+                    _logger.LogInformation($"✅ Найден и удален противник: {opponent.Player.PlayerName}");
+                    return opponent.Player;
+                }
+
+                return null;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "❌ Ошибка атомарного поиска противника");
+                return null;
+            }
+        }
+
+        // Проверка активной игры у игрока
+        public async Task<Game> GetActiveGameByPlayerIdAsync(string playerId)
+        {
+            try
+            {
+                var games = await _firebaseClient
+                    .Child("games")
+                    .OnceAsync<Game>();
+
+                var activeGame = games
+                    .Where(g => g.Object.Status != GameStatus.Player1Won &&
+                               g.Object.Status != GameStatus.Player2Won &&
+                               (g.Object.Player1Id == playerId || g.Object.Player2Id == playerId))
+                    .Select(g =>
+                    {
+                        g.Object.Id = g.Key;
+                        return g.Object;
+                    })
+                    .FirstOrDefault();
+
+                return activeGame;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, $"❌ Ошибка поиска активной игры для {playerId}");
+                return null;
+            }
+        }
+
+        public async Task<List<Game>> GetAllGamesAsync()
+        {
+            if (_firebaseClient == null) return new List<Game>();
+
+            try
+            {
+                var games = await _firebaseClient
+                    .Child("games")
+                    .OnceAsync<Game>();
+
+                return games
+                    .Select(game =>
+                    {
+                        game.Object.Id = game.Key;
+                        return game.Object;
+                    })
+                    .ToList();
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "❌ Ошибка получения всех игр");
+                return new List<Game>();
+            }
+        }
+
+        // Обновляем игру целиком (со всеми досками)
+        public async Task UpdateFullGameAsync(Game game)
+        {
+            if (_firebaseClient == null || string.IsNullOrEmpty(game.Id))
+            {
+                _logger.LogError("❌ Не могу обновить игру: FirebaseClient null или нет game.Id");
+                return;
+            }
+
+            try
+            {
+                _logger.LogInformation($"💾 Сохранение полной игры: {game.Id}");
+
+                // ✅ ДОБАВЬТЕ ЭТУ ПРОВЕРКУ СОГЛАСОВАННОСТИ:
+                _logger.LogInformation($"🎮 Проверка согласованности Status и CurrentPlayerId:");
+                _logger.LogInformation($"   Status={game.Status}, CurrentPlayerId={game.CurrentPlayerId}");
+                _logger.LogInformation($"   Player1Id={game.Player1Id}, Player2Id={game.Player2Id}");
+
+                // Автоматически исправляем несоответствие
+                if (game.Status == GameStatus.Player1Turn && game.CurrentPlayerId != game.Player1Id)
+                {
+                    _logger.LogWarning($"⚠️ ИСПРАВЛЕНИЕ: Status=Player1Turn, но CurrentPlayerId={game.CurrentPlayerId}");
+                    _logger.LogWarning($"   Меняю CurrentPlayerId на {game.Player1Id}");
+                    game.CurrentPlayerId = game.Player1Id;
+                }
+                else if (game.Status == GameStatus.Player2Turn && game.CurrentPlayerId != game.Player2Id)
+                {
+                    _logger.LogWarning($"⚠️ ИСПРАВЛЕНИЕ: Status=Player2Turn, но CurrentPlayerId={game.CurrentPlayerId}");
+                    _logger.LogWarning($"   Меняю CurrentPlayerId на {game.Player2Id}");
+                    game.CurrentPlayerId = game.Player2Id;
+                }
+                else
+                {
+                    _logger.LogInformation($"✅ Status и CurrentPlayerId согласованы");
+                }
+
+                // Логируем важные поля
+                _logger.LogInformation($"⏰ LastTurnTime={game.LastTurnTime}, UpdatedAt={game.UpdatedAt}");
+
+                // Логируем состояние кораблей
+                if (game.Player1Board?.Ships != null)
+                {
+                    foreach (var ship in game.Player1Board.Ships)
+                    {
+                        _logger.LogInformation($"🚢 P1 Корабль '{ship.Name}': Hits={ship.Hits}, IsSunk={ship.IsSunk}");
+                    }
+                }
+
+                if (game.Player2Board?.Ships != null)
+                {
+                    foreach (var ship in game.Player2Board.Ships)
+                    {
+                        _logger.LogInformation($"🚢 P2 Корабль '{ship.Name}': Hits={ship.Hits}, IsSunk={ship.IsSunk}");
+                    }
+                }
+
+                // Сохраняем всю игру
+                await _firebaseClient
+                    .Child("games")
+                    .Child(game.Id)
+                    .PutAsync(game);
+
+                _logger.LogInformation($"✅ Полная игра сохранена: {game.Id}");
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, $"❌ Ошибка сохранения полной игры {game.Id}");
+            }
         }
 
 

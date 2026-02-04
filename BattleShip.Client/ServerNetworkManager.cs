@@ -1,12 +1,12 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Net.Http;
 using System.Net.Http.Json;
+using System.Text.Json;
 using System.Threading.Tasks;
-using System.Linq;
-using Newtonsoft.Json;
+using System.Timers;  
 using BattleShip.Core.Models;
-using Microsoft.AspNetCore.SignalR.Client;
 
 namespace BattleShip.Client
 {
@@ -30,82 +30,81 @@ namespace BattleShip.Client
         public string GameId { get; private set; }
         public string PlayerId { get; private set; }
 
-        private readonly HttpClient _httpClient;
+        // Приватные поля
+        private string _sessionId;
         private string _playerName;
-        private System.Threading.Timer _gameStatePollingTimer;
-
-        // ДОБАВЛЕНО: Флаг для предотвращения повторных алертов об отключении
-        private bool _serverDisconnectAlertShown = false;
-
-        // ✅ ДОБАВЛЕНО: Callback для отправки кораблей (будет установлен из GameWindow)
+        private HttpClient _httpClient;
+        private System.Timers.Timer _gameStatePollTimer;  // Явное указание
+        private System.Timers.Timer _heartbeatTimer;       // Явное указание
         private Func<List<ShipData>> _getShipsCallback;
 
-        // Настройки сервера
+        // Константы
         private const string BaseUrl = "http://localhost:5214";
+        private readonly JsonSerializerOptions _jsonOptions = new JsonSerializerOptions
+        {
+            PropertyNameCaseInsensitive = true,
+            PropertyNamingPolicy = JsonNamingPolicy.CamelCase
+        };
 
         public ServerNetworkManager()
         {
-            _httpClient = new HttpClient { BaseAddress = new Uri(BaseUrl) };
+            _httpClient = new HttpClient
+            {
+                BaseAddress = new Uri(BaseUrl),
+                Timeout = TimeSpan.FromSeconds(30)
+            };
             _httpClient.DefaultRequestHeaders.Add("Accept", "application/json");
         }
 
-        // ✅ ДОБАВЛЕНО: Метод для установки callback получения кораблей
         public void SetShipsCallback(Func<List<ShipData>> getShipsCallback)
         {
             _getShipsCallback = getShipsCallback;
         }
 
+        #region Подключение/Отключение
+
         public async Task ConnectAsync(string playerName)
         {
             try
             {
+                Console.WriteLine($"🔄 Подключение к серверу как '{playerName}'...");
                 _playerName = playerName;
 
-                // 1. Проверяем HTTP сервер 
+                // Проверяем доступность сервера
                 var testResponse = await _httpClient.GetAsync("/api/Game/test");
-
                 if (!testResponse.IsSuccessStatusCode)
-                {
-                    // Получаем подробную информацию об ошибке
-                    var errorContent = await testResponse.Content.ReadAsStringAsync();
-                    Console.WriteLine($"❌ Сервер недоступен. Статус: {testResponse.StatusCode}");
-                    Console.WriteLine($"❌ Ответ: {errorContent}");
+                    throw new Exception($"Сервер недоступен: {testResponse.StatusCode}");
 
-                    throw new Exception($"HTTP сервер недоступен. Статус: {testResponse.StatusCode}");
-                }
+                // Создаем сессию
+                var sessionRequest = new CreateSessionRequest { PlayerName = playerName };
+                var sessionResponse = await _httpClient.PostAsJsonAsync("/api/Game/create-session", sessionRequest);
+                sessionResponse.EnsureSuccessStatusCode();
 
-                // Проверяем ответ
-                var testResult = await testResponse.Content.ReadAsStringAsync();
-                Console.WriteLine($"✅ Сервер доступен: {testResult}");
+                var sessionResult = await sessionResponse.Content.ReadFromJsonAsync<SessionResponse>(_jsonOptions);
+                if (sessionResult == null || !sessionResult.Success)
+                    throw new Exception("Не удалось создать сессию");
 
-                // Генерируем временный PlayerId (сервер создаст настоящий при создании игры)
-                PlayerId = Guid.NewGuid().ToString();
+                _sessionId = sessionResult.SessionId;
+                PlayerId = sessionResult.PlayerId;
+
+                Console.WriteLine($"✅ Сессия создана: SessionId={_sessionId}, PlayerId={PlayerId}");
+
+                // Запускаем heartbeat
+                StartHeartbeat();
 
                 IsConnected = true;
                 OnConnectionChanged?.Invoke(true);
 
-                OnMessageReceived?.Invoke(JsonConvert.SerializeObject(new
+                OnMessageReceived?.Invoke(JsonSerializer.Serialize(new
                 {
-                    type = "connected",
-                    data = new { playerId = PlayerId, playerName },
-                    timestamp = DateTime.Now
+                    Type = "connected",
+                    Data = new { PlayerId = PlayerId, PlayerName = playerName },
+                    Timestamp = DateTime.Now
                 }));
-            }
-            catch (HttpRequestException ex)
-            {
-                Console.WriteLine($"❌ Ошибка HTTP: {ex.Message}");
-                Console.WriteLine($"❌ Проверьте: {BaseUrl}/api/Game/test");
-
-                OnError?.Invoke(new ErrorMessage
-                {
-                    Code = "HTTP_CONNECTION_ERROR",
-                    Message = $"Не удалось подключиться к серверу: {ex.Message}. Проверьте что сервер запущен."
-                });
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"❌ Общая ошибка: {ex.Message}");
-
+                Console.WriteLine($"❌ Ошибка подключения: {ex.Message}");
                 OnError?.Invoke(new ErrorMessage
                 {
                     Code = "CONNECTION_ERROR",
@@ -116,238 +115,862 @@ namespace BattleShip.Client
 
         public async Task DisconnectAsync()
         {
-            IsConnected = false;
-            IsInGame = false;
-            GameId = null;
+            try
+            {
+                if (IsInGame)
+                {
+                    await LeaveGameAsync();
+                }
 
-            // Сбрасываем флаг при явном отключении
-            _serverDisconnectAlertShown = false;
+                StopAllTimers();
+                IsConnected = false;
+                OnConnectionChanged?.Invoke(false);
 
-            // Останавливаем все таймеры
-            _gameStatePollingTimer?.Dispose();
-            _gameStatePollingTimer = null;
-
-            OnConnectionChanged?.Invoke(false);
+                Console.WriteLine("✅ Отключение завершено");
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"❌ Ошибка отключения: {ex.Message}");
+            }
         }
+
+        #endregion
+
+        #region Создание и поиск игры
 
         public async Task<string> CreateGameAsync(string gameMode)
         {
             try
             {
-                Console.WriteLine($"=== CreateGameAsync: {gameMode} ===");
-                Console.WriteLine($"Имя игрока: {_playerName}");
+                Console.WriteLine($"🎮 Создание игры: {gameMode}");
 
-                // ПРОВЕРКА: Есть ли callback для получения кораблей?
                 if (_getShipsCallback == null)
-                {
-                    throw new Exception("Не установлен callback для получения кораблей. Вызовите SetShipsCallback() перед началом игры.");
-                }
+                    throw new Exception("Callback для получения кораблей не установлен");
 
-                // Получаем корабли от клиента через callback
                 var shipsData = _getShipsCallback();
-                if (shipsData == null || shipsData.Count == 0)
-                {
-                    throw new Exception("Корабли не расставлены!");
-                }
+                if (shipsData == null || shipsData.Count != 10)
+                    throw new Exception("Должно быть расставлено 10 кораблей");
 
-                // КОНВЕРТИРУЕМ ShipData в Ship для сервера
                 var serverShips = ConvertToServerShips(shipsData);
 
-                // ИСПОЛЬЗУЕМ НОВЫЙ ЭНДПОИНТ: ready-for-matchmaking
-                var request = new
+                var request = new ReadyForMatchmakingRequest
                 {
-                    playerName = _playerName,
-                    ships = serverShips
+                    SessionId = _sessionId,
+                    PlayerId = PlayerId,
+                    PlayerName = _playerName,
+                    Ships = serverShips
                 };
 
-                Console.WriteLine($"URL: {BaseUrl}/api/Game/ready-for-matchmaking");
-                var jsonRequest = JsonConvert.SerializeObject(request, Formatting.Indented);
-                Console.WriteLine($"Запрос: {jsonRequest}");
+                Console.WriteLine($"📤 Отправка кораблей на сервер...");
+                var response = await _httpClient.PostAsJsonAsync("/api/Game/ready-for-matchmaking", request, _jsonOptions);
+                response.EnsureSuccessStatusCode();
 
-                var response = await _httpClient.PostAsJsonAsync("/api/Game/ready-for-matchmaking", request);
+                var result = await response.Content.ReadFromJsonAsync<ReadyForMatchmakingResponse>(_jsonOptions);
 
-                Console.WriteLine($"Статус ответа: {response.StatusCode}");
+                if (!result.Success)
+                    throw new Exception(result.Message);
 
-                if (!response.IsSuccessStatusCode)
+                if (result.GameFound)
                 {
-                    var errorContent = await response.Content.ReadAsStringAsync();
-                    Console.WriteLine($"Ошибка: {errorContent}");
+                    // Игра найдена
+                    GameId = result.GameId;
+                    IsInGame = true;
 
-                    OnError?.Invoke(new ErrorMessage
+                    Console.WriteLine($"✅ Игра создана: {GameId} против {result.OpponentName}");
+
+                    // 🔥 ДОБАВЛЯЕМ: Автоматически подтверждаем готовность для СЕБЯ
+                    await ConfirmReadyToStart();
+
+                    // 🔥 ДОБАВЛЯЕМ: Ждем пока игра действительно начнется
+                    await WaitForGameToActuallyStart();
+
+                    // Запускаем опрос состояния игры
+                    StartGameStatePolling();
+
+                    OnGameStarted?.Invoke(new GameStartMessage
                     {
-                        Code = "MATCHMAKING_ERROR",
-                        Message = $"Ошибка поиска игры: {errorContent}"
+                        GameId = GameId,
+                        OpponentName = result.OpponentName,
+                        PlayerRole = result.IsMyTurn ? "first" : "second"
                     });
 
-                    return null;
-                }
-
-                var responseContent = await response.Content.ReadAsStringAsync();
-                Console.WriteLine($"✅ Ответ сервера: {responseContent}");
-
-                var result = JsonConvert.DeserializeObject<dynamic>(responseContent);
-
-                if (result == null)
-                {
-                    Console.WriteLine("❌ Ошибка десериализации ответа");
-                    throw new Exception("Неверный ответ сервера");
-                }
-
-                bool success = result.success;
-
-                if (success)
-                {
-                    // Проверяем, сразу ли нашли игру или попали в лобби
-                    bool inLobby = result.inLobby ?? false;
-
-                    if (!inLobby)
-                    {
-                        // НЕМЕДЛЕННО НАШЛИ ПРОТИВНИКА
-                        GameId = result.gameId;
-                        PlayerId = result.playerId;
-                        IsInGame = true;
-
-                        Console.WriteLine($"🎮 Немедленно начали игру: {GameId}");
-
-                        // Запускаем опрос состояния игры
-                        StartGameStatePolling();
-
-                        // Отправляем событие начала игры
-                        OnGameStarted?.Invoke(new GameStartMessage
-                        {
-                            GameId = GameId,
-                            OpponentName = result.opponentName?.ToString() ?? "Соперник",
-                            PlayerRole = result.isMyTurn?.ToString() == "true" ? "first" : "second"
-                        });
-
-                        return GameId;
-                    }
-                    else
-                    {
-                        // ✅ ПОПАЛИ В ЛОББИ - начинаем ожидание
-                        PlayerId = result.playerId.ToString();
-                        Console.WriteLine($"⏳ Добавлены в лобби с PlayerId: {PlayerId}");
-
-                        // ✅ Запускаем ожидание в лобби
-                        _ = StartWaitingInLobby(PlayerId);
-
-                        return null; // Игры еще нет, вернем null
-                    }
+                    return GameId;
                 }
                 else
                 {
-                    Console.WriteLine("❌ Не удалось создать игру");
-                    OnError?.Invoke(new ErrorMessage
-                    {
-                        Code = "MATCHMAKING_FAILED",
-                        Message = result.message?.ToString() ?? "Не удалось найти игру"
-                    });
+                    // В лобби, ожидаем противника
+                    Console.WriteLine($"⏳ В лобби, ожидаем противника...");
+
+                    // Запускаем ожидание
+                    _ = StartWaitingInLobby(PlayerId);
+
                     return null;
                 }
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"❌ Ошибка в CreateGameAsync: {ex.Message}");
-                Console.WriteLine($"StackTrace: {ex.StackTrace}");
-
+                Console.WriteLine($"❌ Ошибка создания игры: {ex.Message}");
                 OnError?.Invoke(new ErrorMessage
                 {
                     Code = "CREATE_GAME_ERROR",
                     Message = $"Ошибка создания игры: {ex.Message}"
                 });
-
                 return null;
             }
         }
 
-        // ✅ ДОБАВЛЕНО: Метод ожидания в лобби
+        // 🔥 НОВЫЙ МЕТОД: Ждем пока игра действительно начнется
+        private async Task WaitForGameToActuallyStart()
+        {
+            Console.WriteLine("⏳ Ожидание начала игры...");
+
+            int attempts = 0;
+            while (attempts < 30) // Ждем до 60 секунд
+            {
+                try
+                {
+                    var gameState = await GetGameStateAsync();
+                    if (gameState != null &&
+                        (gameState.GameStatus == "Player1Turn" || gameState.GameStatus == "Player2Turn"))
+                    {
+                        Console.WriteLine($"🎮 Игра началась! Статус: {gameState.GameStatus}");
+                        return;
+                    }
+
+                    // Также проверяем через ready-to-start
+                    var readyResponse = await _httpClient.GetAsync($"/api/Game/{GameId}/status/{PlayerId}");
+                    if (readyResponse.IsSuccessStatusCode)
+                    {
+                        var status = await readyResponse.Content.ReadFromJsonAsync<dynamic>();
+                        if (status?.gameStatus?.ToString() == "Player1Turn" ||
+                            status?.gameStatus?.ToString() == "Player2Turn")
+                        {
+                            Console.WriteLine($"🎮 Игра началась через статус!");
+                            return;
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"⚠️ Ошибка проверки начала игры: {ex.Message}");
+                }
+
+                await Task.Delay(2000);
+                attempts++;
+            }
+
+            Console.WriteLine("⚠️ Время ожидания начала игры истекло");
+        }
+
+        private async Task ConfirmReadyToStart()
+        {
+            try
+            {
+                var request = new ReadyToStartRequest
+                {
+                    SessionId = _sessionId,
+                    PlayerId = PlayerId,
+                    PlayerName = _playerName
+                };
+
+                var response = await _httpClient.PostAsJsonAsync($"/api/game/{GameId}/ready-to-start", request, _jsonOptions);
+                response.EnsureSuccessStatusCode();
+
+                var result = await response.Content.ReadFromJsonAsync<ReadyToStartResponse>(_jsonOptions);
+                Console.WriteLine($"✅ Готовность подтверждена: {result?.Message}");
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"⚠️ Ошибка подтверждения готовности: {ex.Message}");
+            }
+        }
+
         private async Task StartWaitingInLobby(string playerId)
         {
-            Console.WriteLine($"⏳ Начинаем ожидание в лобби для PlayerId: {playerId}");
+            Console.WriteLine($"⏳ Начало ожидания в лобби...");
 
-            int maxAttempts = 30; // 30 * 2 сек = 1 минута
+            int maxAttempts = 30; // 60 секунд максимум
             for (int i = 0; i < maxAttempts; i++)
             {
                 try
                 {
-                    Console.WriteLine($"Попытка {i + 1}/{maxAttempts} проверки лобби...");
+                    Console.WriteLine($"📡 Проверка лобби ({i + 1}/{maxAttempts})...");
 
                     var response = await _httpClient.GetAsync($"/api/Game/wait-for-opponent/{playerId}");
+                    if (!response.IsSuccessStatusCode)
+                        continue;
 
-                    if (response.IsSuccessStatusCode)
+                    var json = await response.Content.ReadAsStringAsync();
+                    var result = JsonSerializer.Deserialize<ReadyForMatchmakingResponse>(json, _jsonOptions);
+
+                    if (result?.GameFound == true)
                     {
-                        var json = await response.Content.ReadAsStringAsync();
-                        var result = JsonConvert.DeserializeObject<dynamic>(json);
+                        // Нашли игру!
+                        GameId = result.GameId;
+                        IsInGame = true;
 
-                        bool gameFound = result.gameFound ?? false;
+                        Console.WriteLine($"✅ Противник найден! Игра: {GameId}");
 
-                        if (gameFound)
+                        StartGameStatePolling();
+
+                        OnGameStarted?.Invoke(new GameStartMessage
                         {
-                            // ✅ НАШЛИ ИГРУ!
-                            GameId = result.gameId;
-                            PlayerId = result.playerId;
-                            IsInGame = true;
+                            GameId = GameId,
+                            OpponentName = result.OpponentName,
+                            PlayerRole = result.IsMyTurn ? "first" : "second"
+                        });
 
-                            Console.WriteLine($"✅ Нашлась игра: {GameId}");
+                        return;
+                    }
 
-                            // ✅ Запускаем опрос состояния игры
-                            StartGameStatePolling();
+                    if (result?.Message?.Contains("вышел из лобби") == true)
+                    {
+                        Console.WriteLine($"❌ Вышли из лобби");
+                        break;
+                    }
 
-                            // ✅ Отправляем событие начала игры
-                            OnGameStarted?.Invoke(new GameStartMessage
-                            {
-                                GameId = GameId,
-                                OpponentName = result.opponentName?.ToString() ?? "Соперник",
-                                PlayerRole = result.isMyTurn?.ToString() == "true" ? "first" : "second"
-                            });
-
-                            return;
-                        }
-                        else if (result.timeout != null && (bool)result.timeout)
+                    if (i == maxAttempts - 1)
+                    {
+                        Console.WriteLine($"❌ Время ожидания истекло");
+                        OnError?.Invoke(new ErrorMessage
                         {
-                            Console.WriteLine("❌ Время ожидания истекло");
-                            OnError?.Invoke(new ErrorMessage
-                            {
-                                Code = "MATCHMAKING_TIMEOUT",
-                                Message = "Время поиска противника истекло"
-                            });
-                            break;
-                        }
-                        else if (result.message != null)
-                        {
-                            Console.WriteLine($"Сообщение от сервера: {result.message}");
-                        }
+                            Code = "MATCHMAKING_TIMEOUT",
+                            Message = "Не удалось найти противника"
+                        });
                     }
 
                     await Task.Delay(2000); // Ждем 2 секунды
                 }
                 catch (Exception ex)
                 {
-                    Console.WriteLine($"Ошибка опроса лобби: {ex.Message}");
+                    Console.WriteLine($"⚠️ Ошибка проверки лобби: {ex.Message}");
+                    await Task.Delay(2000);
+                }
+            }
+        }
+
+        public Task<bool> JoinGameAsync(string gameId)
+        {
+            // Этот метод используется для присоединения к игре по ID
+            return Task.FromResult(false);
+        }
+
+        public async Task<bool> LeaveGameAsync()
+        {
+            try
+            {
+                if (!string.IsNullOrEmpty(GameId))
+                {
+                    Console.WriteLine($"🚪 Выход из игры {GameId}...");
+
+                    // Если игра не завершена, сдаемся
+                    var gameState = await GetGameStateAsync();
+                    if (gameState?.GameStatus != "finished")
+                    {
+                        await Surrender();
+                    }
+
+                    GameId = null;
+                }
+
+                IsInGame = false;
+                StopGameStatePolling();
+
+                Console.WriteLine($"✅ Выход из игры завершен");
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"❌ Ошибка выхода из игры: {ex.Message}");
+                return false;
+            }
+        }
+
+        private async Task Surrender()
+        {
+            try
+            {
+                var request = new SurrenderRequest { PlayerId = PlayerId };
+                var response = await _httpClient.PostAsJsonAsync($"/api/game/{GameId}/surrender", request, _jsonOptions);
+                response.EnsureSuccessStatusCode();
+
+                Console.WriteLine($"🏳️  Сдались в игре {GameId}");
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"⚠️ Ошибка при сдаче: {ex.Message}");
+            }
+        }
+
+        #endregion
+
+        #region Выстрелы и игровые действия
+
+        public async Task<bool> ShootAsync(int row, int col)
+        {
+            try
+            {
+                if (!IsInGame || string.IsNullOrEmpty(GameId))
+                    throw new Exception("Не в игре");
+
+                Console.WriteLine($"🎯 Выстрел в ({row}, {col})");
+
+                var request = new FireRequest
+                {
+                    PlayerId = PlayerId,
+                    X = row,
+                    Y = col
+                };
+
+                var response = await _httpClient.PostAsJsonAsync($"/api/Game/{GameId}/fire", request, _jsonOptions);
+
+                if (!response.IsSuccessStatusCode)
+                {
+                    var errorJson = await response.Content.ReadAsStringAsync();
+                    var error = JsonSerializer.Deserialize<ErrorResponse>(errorJson, _jsonOptions);
+
+                    OnError?.Invoke(new ErrorMessage
+                    {
+                        Code = "SHOOT_ERROR",
+                        Message = error?.Message ?? "Ошибка выстрела"
+                    });
+                    return false;
+                }
+
+                var result = await response.Content.ReadFromJsonAsync<FireResponse>(_jsonOptions);
+
+                if (!result.Success)
+                {
+                    OnError?.Invoke(new ErrorMessage
+                    {
+                        Code = "SHOOT_FAILED",
+                        Message = result.Message
+                    });
+                    return false;
+                }
+
+                Console.WriteLine($"✅ Результат: Попадание={result.IsHit}, Потоплен={result.IsShipSunk}, Продолжает ход={result.ContinueTurn}");
+                Console.WriteLine($"✅ Сообщение от сервера: {result.Message}");
+
+                await SendBoardUpdateToUI();
+
+                //  ОБНОВИТЬ ВСЮ ДОСКУ С СЕРВЕРА
+                Console.WriteLine("🔄 Запрашиваем обновленную доску с сервера...");
+                await UpdateOpponentBoardFromServer();
+
+                // Также обновим и свою доску (на случай если противник уже стрелял)
+                await UpdateMyBoardFromServer();
+
+                // Создаем сообщение о результате для клиента
+                var shootResult = new ShootResultMessage
+                {
+                    Row = row,
+                    Col = col,
+                    Result = result.IsShipSunk ? "sunk" : (result.IsHit ? "hit" : "miss"),
+                    ShipSize = result.ShipSize,
+                    ShipName = result.ShipName,
+                    IsGameOver = result.IsGameOver,
+                    ContinueTurn = result.ContinueTurn,
+                    NextTurn = result.ContinueTurn ? "player" : "opponent",
+                    CellStatus = result.IsShipSunk ? "sunk" : (result.IsHit ? "hit" : "miss"),
+                    Message = result.Message,
+                    GameStatus = result.GameStatus,
+                    CurrentPlayerId = result.CurrentPlayerId
+                };
+
+                Console.WriteLine($"📤 Отправляем результат в UI: Result={shootResult.Result}, ContinueTurn={shootResult.ContinueTurn}");
+
+                // Отправляем результат выстрела
+                OnShootResult?.Invoke(shootResult);
+
+                // Если игра окончена, делаем финальный опрос состояния
+                if (result.IsGameOver)
+                {
+                    Console.WriteLine("🏁 Игра окончена! Обновляем финальное состояние...");
+                    await Task.Delay(1000);
+                    await PollGameStateAsync();
+
+                    // Отправляем сообщение о конце игры
+                    OnGameEnded?.Invoke(new GameEndMessage
+                    {
+                        Winner = result.CurrentPlayerId == PlayerId ? "player" : "opponent",
+                        Reason = "all_ships_sunk",
+                        Stats = new PlayerStats()
+                    });
+                }
+                else if (!result.ContinueTurn)
+                {
+                    // Если ход переходит противнику - обновляем состояние
+                    Console.WriteLine("🔄 Ход переходит противнику, обновляем состояние...");
+                    await Task.Delay(500);
+                    await PollGameStateAsync();
+
+                    // Уведомляем UI о смене хода
+                    OnGameStateUpdated?.Invoke(new GameStateMessage
+                    {
+                        Status = "playing",
+                        CurrentTurn = "opponent",
+                        GameStateJson = JsonSerializer.Serialize(new
+                        {
+                            GameId,
+                            PlayerId,
+                            OpponentTurn = true,
+                            Message = "Ход противника"
+                        })
+                    });
+                }
+
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"❌ Ошибка при выстреле: {ex.Message}");
+                Console.WriteLine($"❌ StackTrace: {ex.StackTrace}");
+                OnError?.Invoke(new ErrorMessage
+                {
+                    Code = "SHOOT_EXCEPTION",
+                    Message = $"Ошибка при выстреле: {ex.Message}"
+                });
+                return false;
+            }
+        }
+
+
+        public async Task ForceUpdateBoards()
+        {
+            await SendBoardUpdateToUI();
+        }
+        private async Task UpdateOpponentBoardFromServer()
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(GameId) || string.IsNullOrEmpty(PlayerId))
+                    return;
+
+                Console.WriteLine("📡 Запрашиваем состояние доски противника...");
+                var response = await _httpClient.GetAsync($"/api/Game/{GameId}/board/{PlayerId}");
+
+                if (!response.IsSuccessStatusCode)
+                {
+                    Console.WriteLine($"⚠️ Не удалось получить доску: {response.StatusCode}");
+                    return;
+                }
+
+                var boardData = await response.Content.ReadFromJsonAsync<BoardResponse>(_jsonOptions);
+
+                if (boardData != null)
+                {
+                    Console.WriteLine($"✅ Получена доска: {boardData.OpponentBoard?.Cells?.Count} клеток противника");
+
+                    // Отправляем данные в UI через сериализованное сообщение
+                    var updateMessage = new
+                    {
+                        type = "opponent_board_update", 
+                        gameId = GameId,
+                        playerId = PlayerId,
+                        cells = boardData.OpponentBoard?.Cells, 
+                        timestamp = DateTime.Now
+                    };
+
+                    OnMessageReceived?.Invoke(JsonSerializer.Serialize(updateMessage, _jsonOptions));
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"⚠️ Ошибка обновления доски противника: {ex.Message}");
+            }
+        }
+
+        // Обновление своей доски с сервера
+        private async Task UpdateMyBoardFromServer()
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(GameId) || string.IsNullOrEmpty(PlayerId))
+                    return;
+
+                Console.WriteLine("📡 Запрашиваем состояние своей доски...");
+                var response = await _httpClient.GetAsync($"/api/Game/{GameId}/board/{PlayerId}");
+
+                if (!response.IsSuccessStatusCode)
+                    return;
+
+                var boardData = await response.Content.ReadFromJsonAsync<BoardResponse>(_jsonOptions);
+
+                if (boardData != null && boardData.MyBoard != null)
+                {
+                    Console.WriteLine($"✅ Получена своя доска: {boardData.MyBoard.Cells?.Count} клеток, {boardData.MyBoard.Ships?.Count} кораблей");
+
+                    // Отправляем данные в UI
+                    var updateMessage = new
+                    {
+                        type = "my_board_update", 
+                        gameId = GameId,
+                        playerId = PlayerId,
+                        cells = boardData.MyBoard.Cells, 
+                        ships = boardData.MyBoard.Ships, 
+                        timestamp = DateTime.Now
+                    };
+
+                    OnMessageReceived?.Invoke(JsonSerializer.Serialize(updateMessage, _jsonOptions));
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"⚠️ Ошибка обновления своей доски: {ex.Message}");
+            }
+        }
+
+        public async Task<bool> SendShipsPlacementAsync(List<ShipData> ships)
+        {
+            // Этот метод вызывается при повторной отправке кораблей
+
+            return await Task.FromResult(true);
+        }
+
+        #endregion
+
+        #region Опрос состояния игры
+
+        private void StartGameStatePolling()
+        {
+            StopGameStatePolling();
+
+            _gameStatePollTimer = new System.Timers.Timer(2000); // Опрос каждые 2 секунды
+            _gameStatePollTimer.Elapsed += async (sender, e) => await PollGameStateAsync();
+            _gameStatePollTimer.AutoReset = true;
+            _gameStatePollTimer.Start();
+
+            Console.WriteLine("📡 Запущен опрос состояния игры");
+        }
+
+        private void StopGameStatePolling()
+        {
+            if (_gameStatePollTimer != null)
+            {
+                _gameStatePollTimer.Stop();
+                _gameStatePollTimer.Dispose();
+                _gameStatePollTimer = null;
+            }
+        }
+
+        private async Task PollGameStateAsync()
+        {
+            if (!IsInGame || string.IsNullOrEmpty(GameId) || string.IsNullOrEmpty(PlayerId))
+                return;
+
+            try
+            {
+                var gameState = await GetGameStateAsync();
+                if (gameState == null)
+                    return;
+
+                await SendBoardUpdateToUI();
+
+                // Проверяем, не окончена ли игра
+                if (gameState.IsGameOver || gameState.OpponentLeft)
+                {
+                    Console.WriteLine($"🏁 Игра окончена: {gameState.Message}");
+
+                    OnGameEnded?.Invoke(new GameEndMessage
+                    {
+                        Winner = gameState.WinnerId == PlayerId ? "player" : "opponent",
+                        Reason = gameState.OpponentLeft ? "opponent_disconnected" : "all_ships_sunk",
+                        Stats = new PlayerStats()
+                    });
+
+                    IsInGame = false;
+                    StopGameStatePolling();
+                    return;
+                }
+
+                // Обновляем состояние игры
+                var stateMessage = new GameStateMessage
+                {
+                    Status = ConvertGameStatus(gameState.GameStatus),
+                    CurrentTurn = gameState.IsMyTurn ? "player" : "opponent",
+                    PlayerScore = 0,
+                    OpponentScore = 0,
+                    RemainingTime = 0
+                };
+
+                OnGameStateUpdated?.Invoke(stateMessage);
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"⚠️ Ошибка опроса состояния: {ex.Message}");
+            }
+        }
+
+        private async Task SendBoardUpdateToUI()
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(GameId) || string.IsNullOrEmpty(PlayerId))
+                    return;
+
+                Console.WriteLine("📡 Загружаем состояние досок для отправки в UI...");
+
+                var response = await _httpClient.GetAsync($"/api/Game/{GameId}/board/{PlayerId}");
+
+                if (!response.IsSuccessStatusCode)
+                {
+                    Console.WriteLine($"⚠️ Не удалось получить доски: {response.StatusCode}");
+                    return;
+                }
+
+                var boardData = await response.Content.ReadFromJsonAsync<BoardResponse>(_jsonOptions);
+
+                if (boardData != null)
+                {
+                    // ПРЕОБРАЗУЕМ ДАННЫЕ ДЛЯ UI
+                    var uiBoardData = new
+                    {
+                        type = "board_full_update",
+                        myBoard = ConvertToUIBoard(boardData.MyBoard, true),
+                        opponentBoard = ConvertToUIBoard(boardData.OpponentBoard, false),
+                        gameId = GameId,
+                        playerId = PlayerId,
+                        timestamp = DateTime.Now
+                    };
+
+                    var json = JsonSerializer.Serialize(uiBoardData, _jsonOptions);
+                    Console.WriteLine($"📤 Отправляем JSON в UI...");
+                    OnMessageReceived?.Invoke(json);
+
+                    Console.WriteLine($"✅ Отправлено обновление досок в UI");
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"⚠️ Ошибка отправки обновления досок: {ex.Message}");
+            }
+        }
+
+        private dynamic ConvertToUIBoard(dynamic board, bool isMyBoard)
+        {
+            if (board == null) return null;
+
+            var cells = new List<object>();
+
+            if (isMyBoard && board is MyBoard myBoard)
+            {
+                // Преобразуем клетки своей доски
+                foreach (var cell in myBoard.Cells)
+                {
+                    cells.Add(new
+                    {
+                        x = cell.X,
+                        y = cell.Y,
+                        hasShip = cell.HasShip,
+                        wasShot = cell.WasShot,
+                        status = GetStatusString(cell.Status),
+                        isSunk = cell.Status == "4" || cell.Status == "Sunk"
+                    });
+                }
+            }
+            else if (!isMyBoard && board is OpponentBoard opponentBoard)
+            {
+                // Преобразуем клетки доски противника
+                foreach (var cell in opponentBoard.Cells)
+                {
+                    cells.Add(new
+                    {
+                        x = cell.X,
+                        y = cell.Y,
+                        hasShip = false, // Для доски противника всегда скрываем корабли
+                        wasShot = cell.WasShot,
+                        status = GetStatusString(cell.Status),
+                        isSunk = cell.Status == "4" || cell.Status == "Sunk"
+                    });
                 }
             }
 
-            Console.WriteLine("❌ Не удалось найти противника");
-            OnError?.Invoke(new ErrorMessage
+            return new
             {
-                Code = "NO_OPPONENT_FOUND",
-                Message = "Не удалось найти противника"
-            });
+                cells = cells,
+                shipsSunk = isMyBoard ? 0 : (board as OpponentBoard)?.ShipsSunk ?? 0,
+                shipsRemaining = isMyBoard ? 0 : (board as OpponentBoard)?.ShipsRemaining ?? 0
+            };
         }
 
-        // ✅ ДОБАВЛЕНО: Конвертация ShipData в Ship для сервера
-        private List<Ship> ConvertToServerShips(List<ShipData> shipDataList)
+        private string GetStatusString(string status)
+        {
+            if (int.TryParse(status, out int statusInt))
+            {
+                return statusInt switch
+                {
+                    0 => "Empty",
+                    2 => "Hit",
+                    3 => "Miss",
+                    4 => "Sunk",
+                    _ => "Empty"
+                };
+            }
+            return status;
+        }
+
+        private async Task UpdateBothBoardsFromServer()
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(GameId) || string.IsNullOrEmpty(PlayerId))
+                    return;
+
+                Console.WriteLine("📡 Получение текущего состояния досок...");
+                var response = await _httpClient.GetAsync($"/api/Game/{GameId}/board/{PlayerId}");
+
+                if (!response.IsSuccessStatusCode)
+                {
+                    Console.WriteLine($"⚠️ Не удалось получить доски: {response.StatusCode}");
+                    return;
+                }
+
+                var boardData = await response.Content.ReadFromJsonAsync<BoardResponse>(_jsonOptions);
+
+                if (boardData != null)
+                {
+                    // Создаем сообщение об обновлении для UI
+                    var updateMessage = new
+                    {
+                        type = "board_full_update", 
+                        myBoard = boardData.MyBoard, 
+                        opponentBoard = boardData.OpponentBoard, 
+                        gameId = GameId,
+                        playerId = PlayerId,
+                        timestamp = DateTime.Now
+                    };
+
+                    var json = JsonSerializer.Serialize(updateMessage, _jsonOptions);
+                    Console.WriteLine($"📤 Отправляем JSON: {json}"); // Для отладки
+                    OnMessageReceived?.Invoke(json);
+
+                    Console.WriteLine($"✅ Отправлено полное обновление досок в UI");
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"⚠️ Ошибка обновления досок: {ex.Message}");
+            }
+        }
+
+        private async Task<GameStatusResponse> GetGameStateAsync()
+        {
+            try
+            {
+                var response = await _httpClient.GetAsync($"/api/Game/{GameId}/status/{PlayerId}");
+                if (!response.IsSuccessStatusCode)
+                    return null;
+
+                return await response.Content.ReadFromJsonAsync<GameStatusResponse>(_jsonOptions);
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+        public async Task<GameStateMessage> GetUpdatedGameStateAsync()
+        {
+            var gameState = await GetGameStateAsync();
+            if (gameState == null)
+                return null;
+
+            return new GameStateMessage
+            {
+                Status = ConvertGameStatus(gameState.GameStatus),
+                CurrentTurn = gameState.IsMyTurn ? "player" : "opponent"
+            };
+        }
+
+        #endregion
+
+        #region Чат
+
+        public async Task SendChatMessageAsync(string message)
+        {
+            try
+            {
+                if (string.IsNullOrWhiteSpace(message) || string.IsNullOrEmpty(GameId))
+                    return;
+
+                // Простая реализация через сохранение в Firebase
+                var chatMessage = new
+                {
+                    GameId,
+                    PlayerId,
+                    PlayerName = _playerName,
+                    Message = message,
+                    Timestamp = DateTime.UtcNow,
+                    IsSystemMessage = false
+                };
+
+                var response = await _httpClient.PostAsJsonAsync($"/api/chat/{GameId}/save", chatMessage, _jsonOptions);
+
+                if (response.IsSuccessStatusCode)
+                {
+                    Console.WriteLine($"💬 Сообщение отправлено: {message}");
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"⚠️ Ошибка отправки сообщения: {ex.Message}");
+            }
+        }
+
+        #endregion
+
+        #region Heartbeat
+
+        private void StartHeartbeat()
+        {
+            _heartbeatTimer = new System.Timers.Timer(15000); // Каждые 15 секунд
+            _heartbeatTimer.Elapsed += async (sender, e) => await SendHeartbeatAsync();
+            _heartbeatTimer.AutoReset = true;
+            _heartbeatTimer.Start();
+        }
+
+        private async Task SendHeartbeatAsync()
+        {
+            try
+            {
+                var request = new HeartbeatRequest { PlayerId = PlayerId };
+                await _httpClient.PostAsJsonAsync("/api/Game/heartbeat", request, _jsonOptions);
+            }
+            catch
+            {
+                // Игнорируем ошибки heartbeat
+            }
+        }
+
+        private void StopAllTimers()
+        {
+            StopGameStatePolling();
+
+            if (_heartbeatTimer != null)
+            {
+                _heartbeatTimer.Stop();
+                _heartbeatTimer.Dispose();
+                _heartbeatTimer = null;
+            }
+        }
+
+        #endregion
+
+        #region Вспомогательные методы
+
+        private List<Ship> ConvertToServerShips(List<ShipData> clientShips)
         {
             var serverShips = new List<Ship>();
 
-            foreach (var shipData in shipDataList)
+            foreach (var clientShip in clientShips)
             {
                 var serverShip = new Ship
                 {
                     Id = Guid.NewGuid().ToString(),
-                    Name = GetShipName(shipData.Size),
-                    Size = shipData.Size,
-                    CellCoordinates = shipData.Cells.Select(c => $"{c.Row},{c.Col}").ToList(),
+                    Name = GetShipName(clientShip.Size),
+                    Size = clientShip.Size,
+                    CellCoordinates = clientShip.Cells.Select(c => $"{c.Row},{c.Col}").ToList(),
                     Hits = 0,
                     IsSunk = false
                 };
@@ -370,229 +993,24 @@ namespace BattleShip.Client
             };
         }
 
-        public async Task<bool> JoinGameAsync(string gameId)
+        private string ConvertGameStatus(string serverStatus)
         {
-            try
+            return serverStatus switch
             {
-                var response = await _httpClient.PostAsJsonAsync($"/api/game/{gameId}/join", _playerName);
-
-                if (!response.IsSuccessStatusCode)
-                {
-                    throw new Exception($"Не удалось присоединиться: {response.StatusCode}");
-                }
-
-                var result = await response.Content.ReadFromJsonAsync<ServerJoinGameResponse>();
-
-                GameId = gameId;
-                PlayerId = result.Player2Id; // Второй игрок получает Player2Id
-                IsInGame = true;
-
-                // Запускаем опрос состояния игры
-                StartGameStatePolling();
-
-                return true;
-            }
-            catch (Exception ex)
-            {
-                OnError?.Invoke(new ErrorMessage
-                {
-                    Code = "JOIN_GAME_ERROR",
-                    Message = ex.Message
-                });
-                return false;
-            }
+                "WaitingForPlayer" or "PlacingShips" or "WaitingForStart" => "placing",
+                "Player1Turn" or "Player2Turn" => "playing",
+                "Player1Won" or "Player2Won" or "Draw" or "Abandoned" => "finished",
+                _ => "waiting"
+            };
         }
 
-        public Task<bool> LeaveGameAsync()
-        {
-            IsInGame = false;
-            GameId = null;
+        #endregion
 
-            // Сбрасываем флаг при выходе из игры
-            _serverDisconnectAlertShown = false;
-
-            _gameStatePollingTimer?.Dispose();
-            _gameStatePollingTimer = null;
-
-            return Task.FromResult(true);
-        }
-
-        public async Task<bool> SendShipsPlacementAsync(List<ShipData> ships)
-        {
-            try
-            {
-                // ✅ Уже отправляем корабли через ready-for-matchmaking
-                // Этот метод может быть использован для повторной отправки
-                var serverShips = ConvertToServerShips(ships);
-
-                var request = new ServerReadyRequest
-                {
-                    PlayerId = PlayerId,
-                    Ships = serverShips.Select(s => new ServerShip
-                    {
-                        Id = s.Id,
-                        Name = s.Name,
-                        Size = s.Size,
-                        CellCoordinates = s.CellCoordinates,
-                        Hits = s.Hits,
-                        IsSunk = s.IsSunk
-                    }).ToList()
-                };
-
-                var response = await _httpClient.PostAsJsonAsync($"/api/game/{GameId}/ready", request);
-
-                if (!response.IsSuccessStatusCode)
-                {
-                    throw new Exception($"Ошибка при отправке кораблей: {response.StatusCode}");
-                }
-
-                return true;
-            }
-            catch (Exception ex)
-            {
-                OnError?.Invoke(new ErrorMessage
-                {
-                    Code = "SHIPS_PLACEMENT_ERROR",
-                    Message = ex.Message
-                });
-                return false;
-            }
-        }
-
-        public async Task<bool> ShootAsync(int row, int col)
-        {
-            try
-            {
-                // ✅ Отправка выстрела на сервер
-                var request = new
-                {
-                    playerId = PlayerId,
-                    x = row,
-                    y = col
-                };
-
-                Console.WriteLine($"=== ShootAsync: Отправка выстрела ({row},{col}) ===");
-
-                var response = await _httpClient.PostAsJsonAsync($"/api/game/{GameId}/fire", request);
-
-                if (!response.IsSuccessStatusCode)
-                {
-                    Console.WriteLine($"❌ Ошибка выстрела: {response.StatusCode}");
-
-                    var errorJson = await response.Content.ReadAsStringAsync();
-                    var errorResponse = JsonConvert.DeserializeObject<ServerErrorResponse>(errorJson);
-
-                    OnError?.Invoke(new ErrorMessage
-                    {
-                        Code = errorResponse?.Code ?? "SHOOT_ERROR",
-                        Message = errorResponse?.Message ?? "Ошибка выстрела"
-                    });
-
-                    return false;
-                }
-
-                var json = await response.Content.ReadAsStringAsync();
-                Console.WriteLine($"✅ Ответ на выстрел: {json}");
-
-                var result = JsonConvert.DeserializeObject<ServerFireResponse>(json);
-
-                if (result == null)
-                {
-                    Console.WriteLine("❌ Ошибка десериализации ответа");
-                    return false;
-                }
-
-                Console.WriteLine($"Результат: IsHit={result.IsHit}, IsShipSunk={result.IsShipSunk}, ContinueTurn={result.ContinueTurn}");
-
-                // ✅ Создаем результат
-                var shootResult = new ShootResultMessage
-                {
-                    Row = row,
-                    Col = col,
-                    Result = result.IsShipSunk ? "sunk" : (result.IsHit ? "hit" : "miss"),
-                    ShipSize = result.ShipSize,
-                    ShipName = result.ShipName,
-                    CellStatus = result.CellStatus,
-                    NextTurn = result.ContinueTurn ? "player" : "opponent", // ✅ Исправлено
-                    ContinueTurn = result.ContinueTurn,
-                    IsGameOver = result.IsGameOver
-                };
-
-                OnShootResult?.Invoke(shootResult);
-
-                // ✅ Если игра окончена - опросим состояние
-                if (result.IsGameOver)
-                {
-                    Console.WriteLine("🏆 Игра окончена! Опрашиваем состояние...");
-                    await Task.Delay(500);
-                    await PollGameStateAsync();
-                }
-
-                Console.WriteLine($"=== ShootAsync завершен успешно ===");
-                return true;
-            }
-            catch (HttpRequestException ex)
-            {
-                Console.WriteLine($"❌ Ошибка соединения с сервером: {ex.Message}");
-
-                if (!_serverDisconnectAlertShown)
-                {
-                    _serverDisconnectAlertShown = true;
-
-                    OnError?.Invoke(new ErrorMessage
-                    {
-                        Code = "SERVER_DISCONNECTED",
-                        Message = "Сервер недоступен"
-                    });
-                }
-
-                return false;
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"❌ Ошибка в ShootAsync: {ex.Message}");
-                OnError?.Invoke(new ErrorMessage
-                {
-                    Code = "SHOOT_ERROR",
-                    Message = ex.Message
-                });
-                return false;
-            }
-        }
-
-        public async Task SendChatMessageAsync(string message)
-        {
-            if (string.IsNullOrWhiteSpace(message))
-                return;
-
-            try
-            {
-                // ✅ Простая реализация через HTTP
-                var chatMessage = new
-                {
-                    GameId = GameId,
-                    PlayerId = PlayerId,
-                    PlayerName = _playerName,
-                    Message = message,
-                    Timestamp = DateTime.UtcNow,
-                    IsSystemMessage = false
-                };
-
-                var response = await _httpClient.PostAsJsonAsync($"/api/chat/{GameId}/save", chatMessage);
-
-                if (response.IsSuccessStatusCode)
-                {
-                    Console.WriteLine($"💬 Сообщение отправлено: {message}");
-                }
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"❌ Ошибка отправки сообщения: {ex.Message}");
-            }
-        }
+        #region Статистика
 
         public Task<PlayerStats> GetPlayerStatsAsync()
         {
+            // TODO: Реализовать получение статистики с сервера
             return Task.FromResult(new PlayerStats
             {
                 Hits = 0,
@@ -602,190 +1020,58 @@ namespace BattleShip.Client
             });
         }
 
-        private void StartGameStatePolling()
-        {
-            // Останавливаем предыдущий таймер
-            _gameStatePollingTimer?.Dispose();
+        #endregion
 
-            // Запускаем опрос состояния игры каждые 2 секунды
-            _gameStatePollingTimer = new System.Threading.Timer(async _ =>
-            {
-                await PollGameStateAsync();
-            }, null, 0, 2000);
-        }
+        #region Модели ответов сервера
 
-        private async Task PollGameStateAsync()
-        {
-            if (string.IsNullOrEmpty(GameId) || string.IsNullOrEmpty(PlayerId))
-                return;
-
-            try
-            {
-                Console.WriteLine($"=== PollGameStateAsync: Опрос состояния игры {GameId} ===");
-
-                // ✅ Используем эндпоинт /{id}/status/{playerId}
-                var response = await _httpClient.GetAsync($"/api/game/{GameId}/status/{PlayerId}");
-
-                if (!response.IsSuccessStatusCode)
-                {
-                    Console.WriteLine($"❌ Ошибка запроса статуса: {response.StatusCode}");
-                    return;
-                }
-
-                var json = await response.Content.ReadAsStringAsync();
-                Console.WriteLine($"Получен JSON статуса: {json}");
-
-                var status = JsonConvert.DeserializeObject<ServerGameStatusResponse>(json);
-
-                if (status == null)
-                {
-                    Console.WriteLine("❌ Ошибка десериализации статуса");
-                    return;
-                }
-
-                Console.WriteLine($"Статус игры: {status.GameStatus}, Мой ход: {status.IsMyTurn}");
-
-                // ✅ КОНЕЦ ИГРЫ - оппонент вышел
-                if (status.OpponentLeft)
-                {
-                    Console.WriteLine($"🏆 Оппонент вышел! Вы победили!");
-
-                    OnGameEnded?.Invoke(new GameEndMessage
-                    {
-                        Winner = "player",
-                        Reason = "opponent_disconnected",
-                        Stats = new PlayerStats()
-                    });
-
-                    return;
-                }
-
-                // ✅ КОНЕЦ ИГРЫ - обычная победа
-                if (status.IsGameOver)
-                {
-                    Console.WriteLine($"🏆 Игра окончена! Победитель: {status.WinnerId}");
-
-                    bool isPlayerWinner = status.WinnerId == PlayerId;
-
-                    OnGameEnded?.Invoke(new GameEndMessage
-                    {
-                        Winner = isPlayerWinner ? "player" : "opponent",
-                        Reason = "all_ships_sunk",
-                        Stats = new PlayerStats()
-                    });
-
-                    return;
-                }
-
-                // ✅ ОБНОВЛЯЕМ СОСТОЯНИЕ
-                var stateMessage = new GameStateMessage
-                {
-                    Status = ConvertGameStatus(status.GameStatus),
-                    CurrentTurn = status.IsMyTurn ? "player" : "opponent",
-                    PlayerScore = 0,
-                    OpponentScore = 0,
-                    RemainingTime = 0
-                };
-
-                OnGameStateUpdated?.Invoke(stateMessage);
-
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"❌ Ошибка опроса состояния: {ex.Message}");
-            }
-        }
-
-        private string ConvertGameStatus(string serverStatus)
-        {
-            return serverStatus switch
-            {
-                "WaitingForPlayer" or "PlacingShips" => "placing",
-                "Player1Turn" or "Player2Turn" => "playing",
-                "Player1Won" or "Player2Won" => "finished",
-                _ => "waiting"
-            };
-        }
-
-        public async Task<GameStateMessage> GetUpdatedGameStateAsync()
-        {
-            try
-            {
-                if (string.IsNullOrEmpty(GameId) || string.IsNullOrEmpty(PlayerId))
-                    return null;
-
-                var response = await _httpClient.GetAsync($"/api/game/{GameId}/status/{PlayerId}");
-
-                if (!response.IsSuccessStatusCode)
-                    return null;
-
-                var json = await response.Content.ReadAsStringAsync();
-                var status = JsonConvert.DeserializeObject<ServerGameStatusResponse>(json);
-
-                return new GameStateMessage
-                {
-                    Status = ConvertGameStatus(status.GameStatus),
-                    CurrentTurn = status.IsMyTurn ? "player" : "opponent"
-                };
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"Ошибка получения состояния: {ex.Message}");
-                return null;
-            }
-        }
-
-        // Вспомогательные классы для десериализации ответов сервера
-        private class ServerJoinGameResponse
+        // Модели для десериализации ответов сервера
+        private class SessionResponse
         {
             public bool Success { get; set; }
-            public string GameId { get; set; }
-            public string Status { get; set; }
-            public string Player1Id { get; set; }
-            public string Player2Id { get; set; }
+            public string SessionId { get; set; }
+            public string PlayerId { get; set; }
             public string Message { get; set; }
         }
 
-        private class ServerReadyRequest
+        private class ReadyForMatchmakingResponse
         {
+            public bool Success { get; set; }
+            public bool GameFound { get; set; }
+            public bool InLobby { get; set; }
+            public string GameId { get; set; }
             public string PlayerId { get; set; }
-            public List<ServerShip> Ships { get; set; }
+            public string OpponentName { get; set; }
+            public string GameStatus { get; set; }
+            public bool IsMyTurn { get; set; }
+            public string Message { get; set; }
         }
 
-        private class ServerShip
+        private class ReadyToStartResponse
         {
-            public string Id { get; set; }
-            public string Name { get; set; }
-            public int Size { get; set; }
-            public List<string> CellCoordinates { get; set; }
-            public int Hits { get; set; }
-            public bool IsSunk { get; set; }
+            public bool Success { get; set; }
+            public string GameStatus { get; set; }
+            public bool IsGameStarted { get; set; }
+            public string CurrentPlayerId { get; set; }
+            public bool Player1Ready { get; set; }
+            public bool Player2Ready { get; set; }
+            public string Message { get; set; }
         }
 
-        private class ServerFireResponse
+        private class FireResponse
         {
             public bool Success { get; set; }
             public bool IsHit { get; set; }
             public bool IsShipSunk { get; set; }
             public string ShipName { get; set; }
             public int ShipSize { get; set; }
-            public string CellStatus { get; set; }
             public bool IsGameOver { get; set; }
             public string GameStatus { get; set; }
             public string CurrentPlayerId { get; set; }
-            public string NextPlayer { get; set; }
             public bool ContinueTurn { get; set; }
             public string Message { get; set; }
         }
 
-        private class ServerErrorResponse
-        {
-            public bool Success { get; set; }
-            public string Message { get; set; }
-            public string Code { get; set; }
-        }
-
-        private class ServerGameStatusResponse
+        private class GameStatusResponse
         {
             public string GameId { get; set; }
             public string GameStatus { get; set; }
@@ -799,5 +1085,19 @@ namespace BattleShip.Client
             public int OpponentBoardShipsRemaining { get; set; }
             public string Message { get; set; }
         }
+
+        private class ErrorResponse
+        {
+            public bool Success { get; set; }
+            public string Message { get; set; }
+            public string Code { get; set; }
+        }
+
+        private class HeartbeatRequest
+        {
+            public string PlayerId { get; set; }
+        }
+
+        #endregion
     }
 }

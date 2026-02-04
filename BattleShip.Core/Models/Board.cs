@@ -41,7 +41,7 @@ public class Board
     {
         Console.WriteLine($"🔄 Восстановление связей клеток в доске...");
         Console.WriteLine($"   Кораблей: {Ships?.Count ?? 0}");
-        Console.WriteLine($"   Клеток до: {Cells?.Count ?? 0}");
+        Console.WriteLine($"   Клеток: {Cells?.Count ?? 0}");
 
         if (Cells == null || Ships == null)
         {
@@ -49,19 +49,15 @@ public class Board
             return;
         }
 
-        var wasShotCells = new Dictionary<string, bool>();
-        foreach (var cell in Cells)
-        {
-            string key = $"{cell.X},{cell.Y}";
-            wasShotCells[key] = cell.WasShot;
-        }
-
+        // 1. Очищаем связи с кораблями (но сохраняем WasShot!)
         foreach (var cell in Cells)
         {
             cell.HasShip = false;
             cell.ShipId = null;
+            // НЕ трогаем cell.WasShot и cell.Status!
         }
 
+        // 2. Восстанавливаем связи с кораблями
         foreach (var ship in Ships)
         {
             if (ship.CellCoordinates == null) continue;
@@ -79,44 +75,30 @@ public class Board
                         cell.HasShip = true;
                         cell.ShipId = ship.Id;
 
-                        string key = $"{x},{y}";
-                        if (wasShotCells.ContainsKey(key))
+                        // Если корабль потоплен, помечаем все его клетки как Sunk
+                        if (ship.IsSunk)
                         {
-                            cell.WasShot = wasShotCells[key];
+                            cell.Status = CellStatus.Sunk;
+                            cell.WasShot = true;
                         }
 
-                        if (cell.WasShot)
-                        {
-                            cell.Status = cell.HasShip ? CellStatus.Hit : CellStatus.Miss;
-                        }
-
-                        Console.WriteLine($"   ✅ Клетка ({x},{y}) → корабль '{ship.Name}', WasShot={cell.WasShot}");
+                        Console.WriteLine($"   ✅ Клетка ({x},{y}) → корабль '{ship.Name}', WasShot={cell.WasShot}, Status={cell.Status}");
                     }
                 }
             }
+        }
+
+        // 3. Восстанавливаем статусы отстрелянных клеток
+        // (если клетка была отстреляна, но не связана с кораблем - это Miss)
+        foreach (var cell in Cells.Where(c => c.WasShot && !c.HasShip))
+        {
+            cell.Status = CellStatus.Miss;
         }
 
         int shipCellsCount = Cells.Count(c => c.HasShip);
         int shotCellsCount = Cells.Count(c => c.WasShot);
         Console.WriteLine($"📊 Клеток с кораблями: {shipCellsCount} (должно быть 20)");
         Console.WriteLine($"🎯 Прострелянных клеток: {shotCellsCount}");
-
-        foreach (var cell in Cells)
-        {
-            string key = $"{cell.X},{cell.Y}";
-            if (wasShotCells.ContainsKey(key))
-            {
-                cell.WasShot = wasShotCells[key];
-                if (cell.WasShot && !cell.HasShip)
-                {
-                    cell.Status = CellStatus.Miss;
-                }
-                else if (cell.WasShot && cell.HasShip)
-                {
-                    cell.Status = cell.Status == CellStatus.Sunk ? CellStatus.Sunk : CellStatus.Hit;
-                }
-            }
-        }
     }
 
     public bool ValidateShipPlacement()
@@ -335,7 +317,17 @@ public class Board
         if (ships != null && ships.Any())
         {
             Console.WriteLine($"   Размещаем {ships.Count} кораблей от клиента");
-            Ships = ships;
+
+            
+            Ships.Clear();
+            Ships.AddRange(ships);
+
+            RestoreCellShipReferences();
+        }
+        else if (Ships != null && Ships.Any())
+        {
+            // Если корабли уже есть в объекте - просто восстанавливаем ссылки
+            Console.WriteLine($"   Восстанавливаем {Ships.Count} существующих кораблей");
             RestoreCellShipReferences();
         }
     }

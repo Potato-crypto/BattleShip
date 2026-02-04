@@ -1,17 +1,20 @@
 using BattleShip.Client.Services;
+using BattleShip.Core.Models;
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Net.Http;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
 using System.Windows.Media;
 using System.Windows.Threading;
+using System.Net.Http.Json;
+using System.Text.Json;
 
 namespace BattleShip.Client
 {
-    // Вспомогательный класс для хранения состояние клетки
     public class CellState
     {
         public Brush BaseColor { get; set; }
@@ -22,31 +25,46 @@ namespace BattleShip.Client
         public bool IsSunk { get; set; }
         public bool IsPlacing { get; set; }
         public bool IsAroundSunk { get; set; }
+        public bool WasShot => IsHit || IsMiss;
 
         public Brush GetCurrentColor()
         {
-            if (IsAroundSunk) return Brushes.LightGray; // Клетки вокруг потопленного корабля
-
-            if (IsSunk) return Brushes.DarkRed; // Потопленный корабль
-
-            if (IsHit) return Brushes.Red; // Попадание в корабль
-
-            if (IsMiss) return Brushes.LightSlateGray; // Промах
-
-            if (IsHighlighted)
+            // 1. Клетки вокруг потопленных кораблей - ПЕРВЫМИ!
+            if (IsAroundSunk)
             {
-                if (BaseColor is SolidColorBrush baseBrush)
-                {
-                    var color = baseBrush.Color;
-                    var highlightedColor = Color.FromArgb(
-                        255,
-                        (byte)Math.Min(color.R + 40, 255),
-                        (byte)Math.Min(color.G + 40, 255),
-                        (byte)Math.Min(color.B + 40, 255));
-
-                    return new SolidColorBrush(highlightedColor);
-                }
+                return Brushes.LightGray; // Более светлый цвет для ясности
             }
+
+            // 2. Потом потопленные клетки
+            if (IsSunk)
+            {
+                return Brushes.DarkRed;
+            }
+
+            // 3. Потом попадания
+            if (IsHit)
+            {
+                return Brushes.Red;
+            }
+
+            // 4. Потом обычные промахи
+            if (IsMiss)
+            {
+                return Brushes.LightBlue;
+            }
+
+            // 5. Подсветка
+            if (IsHighlighted && BaseColor is SolidColorBrush baseBrush)
+            {
+                var color = baseBrush.Color;
+                var highlightedColor = Color.FromArgb(
+                    255,
+                    (byte)Math.Min(color.R + 40, 255),
+                    (byte)Math.Min(color.G + 40, 255),
+                    (byte)Math.Min(color.B + 40, 255));
+                return new SolidColorBrush(highlightedColor);
+            }
+
             return BaseColor;
         }
     }
@@ -61,21 +79,24 @@ namespace BattleShip.Client
         private INetworkService _networkService;
         private Dictionary<string, Border> _playerCells = new Dictionary<string, Border>();
         private Dictionary<string, Border> _opponentCells = new Dictionary<string, Border>();
+        private string _playerName;
+        private string _gameId;
 
-        // Состояние игры клиента
         public enum GameClientState
         {
-            PlacingShips,      // Расстановка кораблей (до поиска)
-            SearchingGame,     // Поиск противника
-            InGame,            // Игра идет
-            GameFinished       // Игра окончена
+            PlacingShips,
+            SearchingGame,
+            InGame,
+            GameFinished
         }
 
         private GameClientState _currentState = GameClientState.PlacingShips;
 
-        // Таймер хода
+        // Таймер хода - только один!
         private DispatcherTimer _turnTimer;
         private int _remainingTurnTime = 30;
+        private bool _isMyTurn = false;
+
         private string _opponentName = "Соперник";
         private bool _isExitingFromGameOver = false;
 
@@ -85,23 +106,25 @@ namespace BattleShip.Client
         private HashSet<string> _hitsOnPlayer = new HashSet<string>();
         private HashSet<string> _hitsOnOpponent = new HashSet<string>();
 
-        // Для задержки особых сообщений
         private bool _showingSpecialMessage = false;
         private DispatcherTimer _messageTimer;
+
+        private HttpClient _httpClient = new HttpClient { BaseAddress = new Uri("http://localhost:5214") };
+        private string _playerId;
 
         public GameWindow()
         {
             InitializeComponent();
 
-            // Инициализация сетевого сервиса 
             _networkService = new ServerNetworkManager();
-
+            _gameLogic = new GameLogic();
             _networkService.SetShipsCallback(() => _gameLogic.GetShipsForServer());
 
             SetupNetworkEvents();
-
-            _gameLogic = new GameLogic();
             InitializeGameBoards();
+
+
+            _networkService.OnMessageReceived += HandleNetworkMessage;
 
             // Инициализация таймера хода
             _turnTimer = new DispatcherTimer();
@@ -109,123 +132,570 @@ namespace BattleShip.Client
             _turnTimer.Tick += TurnTimer_Tick;
             TurnTimerContainer.Visibility = Visibility.Collapsed;
 
-            // Блокируем кнопки поиска пока корабли не расставлены
             UpdateButtonsState();
-
-            // Подключаемся к "серверу" с именем игрока
             ConnectToServer();
 
-            // Инициализируем таймер сообщений
             _messageTimer = new DispatcherTimer();
             _messageTimer.IsEnabled = false;
 
-            // Настраиваем обработчики событий чата
             ChatWindowControl.MessageSent += ChatWindowControl_MessageSent;
             ChatWindowControl.Closed += ChatWindowControl_Closed;
             ChatWindowControl.UnreadCountChanged += ChatWindowControl_UnreadCountChanged;
         }
 
-
-        private void AddGameMessage(string message, bool isOpponentAction = false)
+        private JsonSerializerOptions _jsonOptions = new JsonSerializerOptions
         {
-            Dispatcher.Invoke(() =>
-            {
-                // Просто показываем в статусе на короткое время
-                if (!_showingSpecialMessage && message.Length < 50)
-                {
-                    ShowSpecialMessage(message, 2000);
-                }
+            PropertyNameCaseInsensitive = true,
+            PropertyNamingPolicy = JsonNamingPolicy.CamelCase
+        };
 
-                // Также можно добавить в чат
-                ChatWindowControl.AddSystemMessage(message);
-            });
+        private async void HandleNetworkMessage(string jsonMessage)
+        {
+            try
+            {
+                Console.WriteLine($"📥 Получено сетевое сообщение: {jsonMessage.Substring(0, Math.Min(200, jsonMessage.Length))}...");
+
+                using JsonDocument doc = JsonDocument.Parse(jsonMessage);
+                var root = doc.RootElement;
+
+                if (root.TryGetProperty("type", out var typeProperty))
+                {
+                    string type = typeProperty.GetString();
+                    Console.WriteLine($"   Тип сообщения: {type}");
+
+                    await Dispatcher.Invoke(async () =>
+                    {
+                        if (type == "board_full_update")
+                        {
+                            // 🔥 УПРОЩЕННЫЙ ПАРСИНГ - используем Dictionary
+                            try
+                            {
+                                var messageDict = JsonSerializer.Deserialize<Dictionary<string, object>>(jsonMessage, _jsonOptions);
+
+                                if (messageDict.TryGetValue("myBoard", out var myBoardObj) &&
+                                    messageDict.TryGetValue("opponentBoard", out var opponentBoardObj))
+                                {
+                                    // Преобразуем в строку и парсим отдельно
+                                    string myBoardJson = JsonSerializer.Serialize(myBoardObj, _jsonOptions);
+                                    string opponentBoardJson = JsonSerializer.Serialize(opponentBoardObj, _jsonOptions);
+
+                                    var myBoardData = JsonSerializer.Deserialize<MyBoard>(myBoardJson, _jsonOptions);
+                                    var opponentBoardData = JsonSerializer.Deserialize<OpponentBoard>(opponentBoardJson, _jsonOptions);
+
+                                    if (myBoardData != null && opponentBoardData != null)
+                                    {
+                                        Console.WriteLine($"🔄 Обновление UI из board_full_update");
+
+                                        UpdateBoardsFromServer(new BoardResponse
+                                        {
+                                            MyBoard = myBoardData,
+                                            OpponentBoard = opponentBoardData
+                                        });
+
+                                        Console.WriteLine($"✅ UI обновлен: {myBoardData.Cells?.Count ?? 0} своих клеток, " +
+                                                        $"{opponentBoardData.Cells?.Count ?? 0} клеток противника");
+                                    }
+                                }
+                            }
+                            catch (Exception ex)
+                            {
+                                Console.WriteLine($"❌ Ошибка парсинга board_full_update: {ex.Message}");
+                            }
+                        }
+                        else
+                        {
+                            Console.WriteLine($"📨 Другое сообщение типа: {type}");
+                        }
+                    });
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"❌ Ошибка обработки сетевого сообщения: {ex.Message}");
+            }
         }
 
-        // Обработчик тика таймера
+
+        private async Task LoadGameStateFromServer()
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(_networkService.GameId) || string.IsNullOrEmpty(_playerId))
+                {
+                    Console.WriteLine("⚠️ LoadGameStateFromServer: Нет GameId или PlayerId");
+                    return;
+                }
+
+                Console.WriteLine($"📡 LoadGameStateFromServer: Начинаем загрузку...");
+
+                var url = $"/api/game/{_networkService.GameId}/board/{_playerId}";
+                Console.WriteLine($"   URL: {url}");
+
+                HttpResponseMessage response = null;
+                try
+                {
+                    response = await _httpClient.GetAsync(url);
+                }
+                catch (HttpRequestException hrex)
+                {
+                    Console.WriteLine($"❌ HTTP ошибка: {hrex.Message}");
+                    return;
+                }
+
+                Console.WriteLine($"   Статус ответа: {response.StatusCode}");
+
+                if (response.IsSuccessStatusCode)
+                {
+                    string jsonContent = null;
+                    try
+                    {
+                        jsonContent = await response.Content.ReadAsStringAsync();
+                    }
+                    catch (Exception ex)
+                    {
+                        Console.WriteLine($"❌ Ошибка чтения контента: {ex.Message}");
+                        return;
+                    }
+
+                    Console.WriteLine($"📄 Получен JSON: {jsonContent.Length} символов");
+
+                    // Проверим первые 300 символов
+                    if (jsonContent.Length > 0)
+                    {
+                        string preview = jsonContent.Length > 300
+                            ? jsonContent.Substring(0, 300) + "..."
+                            : jsonContent;
+                        Console.WriteLine($"   Предпросмотр: {preview}");
+                    }
+
+                    // Пробуем десериализовать
+                    try
+                    {
+                        var boardState = JsonSerializer.Deserialize<BoardResponse>(
+                            jsonContent,
+                            new JsonSerializerOptions
+                            {
+                                PropertyNameCaseInsensitive = true
+                            }
+                        );
+
+                        if (boardState != null && boardState.MyBoard?.Cells != null)
+                        {
+                            // Проверяем клетки вокруг потопленного корабля
+                            Console.WriteLine("🔍 Проверяем клетки вокруг потопленных кораблей:");
+
+                            var sunkCells = boardState.MyBoard.Cells
+                                .Where(c => c.Status == "4" || c.Status == "Sunk")
+                                .ToList();
+
+                            Console.WriteLine($"   Потопленных клеток: {sunkCells.Count}");
+
+                            foreach (var sunkCell in sunkCells)
+                            {
+                                Console.WriteLine($"   🚢 Потопленная клетка ({sunkCell.X},{sunkCell.Y}): " +
+                                                 $"Status={sunkCell.Status}, HasShip={sunkCell.HasShip}");
+
+                                // Проверяем клетки вокруг
+                                for (int dx = -1; dx <= 1; dx++)
+                                {
+                                    for (int dy = -1; dy <= 1; dy++)
+                                    {
+                                        if (dx == 0 && dy == 0) continue;
+
+                                        int nx = sunkCell.X + dx;
+                                        int ny = sunkCell.Y + dy;
+
+                                        if (nx >= 0 && nx < 10 && ny >= 0 && ny < 10)
+                                        {
+                                            var neighbor = boardState.MyBoard.Cells
+                                                .FirstOrDefault(c => c.X == nx && c.Y == ny);
+
+                                            if (neighbor != null)
+                                            {
+                                                string neighborStatus = ConvertCellStatus(neighbor.Status);
+
+                                                if (neighborStatus == "Miss" && !neighbor.HasShip && neighbor.WasShot)
+                                                {
+                                                    Console.WriteLine($"      🎯 Клетка вокруг ({nx},{ny}): " +
+                                                                    $"Status={neighbor.Status}->{neighborStatus}, " +
+                                                                    $"HasShip={neighbor.HasShip}, WasShot={neighbor.WasShot}");
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+
+                            UpdateBoardsFromServer(boardState);
+                        }
+                        else
+                        {
+                            Console.WriteLine($"❌ Десериализованный объект null");
+                        }
+                    }
+                    catch (JsonException jex)
+                    {
+                        Console.WriteLine($"❌ JsonException при десериализации: {jex.Message}");
+                        Console.WriteLine($"❌ Path: {jex.Path}, LineNumber: {jex.LineNumber}");
+
+                        // Попробуем десериализовать как динамический объект для отладки
+                        try
+                        {
+                            var dynamicObj = JsonSerializer.Deserialize<Dictionary<string, object>>(jsonContent);
+                            Console.WriteLine($"🔍 Динамический объект ключи: {string.Join(", ", dynamicObj.Keys)}");
+                        }
+                        catch { }
+                    }
+                }
+                else
+                {
+                    string errorContent = await response.Content.ReadAsStringAsync();
+                    Console.WriteLine($"❌ Ошибка HTTP {response.StatusCode}: {errorContent}");
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"❌ Исключение в LoadGameStateFromServer: {ex.Message}");
+                Console.WriteLine($"❌ StackTrace: {ex.StackTrace}");
+            }
+        }
+
+        private void UpdateBoardsFromServer(BoardResponse boardState)
+        {
+            try
+            {
+                Console.WriteLine($"🔄 UpdateBoardsFromServer: начало");
+
+                // 1. Обновляем свое поле
+                if (boardState.MyBoard?.Cells != null)
+                {
+                    Console.WriteLine($"   Обновляем свое поле: {boardState.MyBoard.Cells.Count} клеток");
+
+                    foreach (var serverCell in boardState.MyBoard.Cells)
+                    {
+                        string cellKey = $"{serverCell.X},{serverCell.Y}";
+                        if (_playerCells.TryGetValue(cellKey, out Border cell))
+                        {
+                            UpdateCellFromServerData(cell, serverCell, true);
+                        }
+                    }
+                }
+
+                // 2. Обновляем поле противника
+                if (boardState.OpponentBoard?.Cells != null)
+                {
+                    Console.WriteLine($"   Обновляем поле противника: {boardState.OpponentBoard.Cells.Count} клеток");
+
+                    foreach (var serverCell in boardState.OpponentBoard.Cells)
+                    {
+                        string cellKey = $"{serverCell.X},{serverCell.Y}";
+                        if (_opponentCells.TryGetValue(cellKey, out Border cell))
+                        {
+                            UpdateCellFromServerData(cell, serverCell, false);
+                        }
+                    }
+                }
+
+                // 3. Обновляем визуально
+                UpdatePlayerBoardVisual();
+                UpdateOpponentBoardVisual();
+
+                Console.WriteLine($"✅ UpdateBoardsFromServer: завершено");
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"❌ Ошибка в UpdateBoardsFromServer: {ex.Message}");
+            }
+        }
+
+        private void UpdateOpponentBoardVisual()
+        {
+            foreach (var kvp in _opponentCells)
+            {
+                var cell = kvp.Value;
+                if (cell.Tag is Tuple<string, CellState> tag)
+                {
+                    var (_, cellState) = tag;
+                    cell.Background = cellState.GetCurrentColor();
+                    UpdateOpponentCellSymbol(cell, cellState);
+
+                    // Обновляем доступность
+                    cell.IsEnabled = !cellState.WasShot && !cellState.IsAroundSunk && _isMyTurn;
+                    cell.Cursor = cell.IsEnabled ? Cursors.Hand : Cursors.Arrow;
+                }
+            }
+        }
+
+        private void UpdateCellFromServerData(Border cell, BoardCell serverCell, bool isPlayerCell)
+        {
+            try
+            {
+                if (cell.Tag is Tuple<string, CellState> tag)
+                {
+                    var (_, cellState) = tag;
+
+                    // Получаем статус из серверных данных
+                    string status = ConvertCellStatus(serverCell.Status);
+
+                    // ОБНОВЛЯЕМ ВСЕ СТАТУСЫ ИЗ ДАННЫХ СЕРВЕРА
+                    cellState.IsHit = status == "Hit" || status == "Sunk";
+                    cellState.IsMiss = status == "Miss";
+                    cellState.IsSunk = status == "Sunk";
+
+                    // 🔥 ВАЖНО: Клетки вокруг потопленных кораблей
+                    // Если это промах (Miss) и клетка была отстреляна, и нет корабля
+                    cellState.IsAroundSunk = (status == "Miss") &&
+                                            serverCell.WasShot &&
+                                            !serverCell.HasShip;
+
+                    // Обновляем информацию о корабле (только для своей доски)
+                    if (isPlayerCell)
+                    {
+                        cellState.HasShip = serverCell.HasShip;
+                    }
+                    else
+                    {
+                        // Для противника всегда скрываем корабли
+                        cellState.HasShip = false;
+                    }
+
+                    // Логирование для отладки
+                    if (cellState.IsAroundSunk || cellState.IsSunk || cellState.IsHit)
+                    {
+                        Console.WriteLine($"   [{serverCell.X},{serverCell.Y}] Status={status}, " +
+                                         $"HasShip={serverCell.HasShip}, WasShot={serverCell.WasShot}, " +
+                                         $"IsHit={cellState.IsHit}, IsMiss={cellState.IsMiss}, " +
+                                         $"IsSunk={cellState.IsSunk}, IsAroundSunk={cellState.IsAroundSunk}");
+                    }
+
+                    // Обновляем цвет
+                    cell.Background = cellState.GetCurrentColor();
+
+                    // Обновляем символ
+                    if (isPlayerCell)
+                        UpdatePlayerCellSymbol(cell, cellState);
+                    else
+                        UpdateOpponentCellSymbol(cell, cellState);
+
+                    // Обновляем доступность (для поля противника)
+                    if (!isPlayerCell)
+                    {
+                        cell.IsEnabled = !cellState.WasShot && !cellState.IsAroundSunk && _isMyTurn;
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"❌ Ошибка в UpdateCellFromServerData: {ex.Message}");
+            }
+        }
+
+        private string ConvertCellStatus(string statusNumber)
+        {
+            if (int.TryParse(statusNumber, out int statusInt))
+            {
+                return statusInt switch
+                {
+                    0 => "Empty",
+                    2 => "Hit",
+                    3 => "Miss",
+                    4 => "Sunk",
+                    _ => "Empty"
+                };
+            }
+
+            // Если пришла строка, а не число
+            return statusNumber switch
+            {
+                "0" => "Empty",
+                "2" => "Hit",
+                "3" => "Miss",
+                "4" => "Sunk",
+                _ => statusNumber // Оставляем как есть
+            };
+        }
+
+
         private void TurnTimer_Tick(object sender, EventArgs e)
         {
+            if (!_isMyTurn) return;
+
             if (_remainingTurnTime > 0)
             {
                 _remainingTurnTime--;
-                TurnTimeTextBlock.Text = $"⏱️ {_remainingTurnTime} сек";
-                //TurnStatusTextBlock.Text = "Ваш ход";
+                UpdateTimerDisplay();
+            }
+            else
+            {
+                _turnTimer.Stop();
+                TimeExpired();
+            }
+        }
 
-                // Меняем цвет при малом времени
+        private void UpdateTimerDisplay()
+        {
+            Dispatcher.Invoke(() =>
+            {
+                TurnTimeTextBlock.Text = $"{_remainingTurnTime} сек";
+
                 if (_remainingTurnTime <= 10)
                 {
-                    TurnTimerContainer.Background = new SolidColorBrush(Color.FromRgb(231, 76, 60)); // Красный
+                    TurnTimerContainer.Background = new SolidColorBrush(Color.FromRgb(231, 76, 60));
                     TurnTimeTextBlock.Foreground = Brushes.White;
                 }
                 else if (_remainingTurnTime <= 20)
                 {
-                    TurnTimerContainer.Background = new SolidColorBrush(Color.FromRgb(241, 196, 15)); // Оранжевый
+                    TurnTimerContainer.Background = new SolidColorBrush(Color.FromRgb(241, 196, 15));
                     TurnTimeTextBlock.Foreground = Brushes.Black;
                 }
                 else
                 {
-                    TurnTimerContainer.Background = new SolidColorBrush(Color.FromRgb(46, 204, 113)); // Зеленый
+                    TurnTimerContainer.Background = new SolidColorBrush(Color.FromRgb(46, 204, 113));
                     TurnTimeTextBlock.Foreground = Brushes.White;
                 }
-            }
-            else
-            {
-                // Время истекло - просто передаем ход
-                _turnTimer.Stop();
-                TurnTimeTextBlock.Text = "⏱️ 0 сек";
-                //TurnStatusTextBlock.Text = "Время вышло";
-                TurnTimerContainer.Background = new SolidColorBrush(Color.FromRgb(149, 165, 166)); // Серый
+            });
+        }
 
-                // Автоматически передаем ход противнику
-                if (_networkService.IsInGame && _currentState == GameClientState.InGame)
+        private void StartMyTurn()
+        {
+            Dispatcher.Invoke(() =>
+            {
+                _isMyTurn = true;
+                _remainingTurnTime = 30;
+                _turnTimer.Stop();
+                _turnTimer.Start();
+
+                TurnTimerContainer.Visibility = Visibility.Visible;
+                UpdateTimerDisplay();
+
+                EnableOpponentBoard(true);
+                GameStatus.Text = "Ваш ход! Выберите клетку на поле противника";
+
+                Console.WriteLine("✅ Таймер хода запущен");
+            });
+        }
+
+        private void StopMyTurn()
+        {
+            Dispatcher.Invoke(() =>
+            {
+                _isMyTurn = false;
+                _turnTimer.Stop();
+                TurnTimerContainer.Visibility = Visibility.Collapsed;
+
+                EnableOpponentBoard(false);
+                GameStatus.Text = "Ход противника...";
+
+                Console.WriteLine("⏸️ Таймер хода остановлен");
+            });
+        }
+
+        private async void TimeExpired()
+        {
+            Console.WriteLine("⏰ Время хода истекло!");
+
+            if (_currentState == GameClientState.InGame && await IsMyTurn())
+            {
+                await SetOpponentTurnAsync();
+                ShowSpecialMessage("Время хода истекло!", 2000);
+            }
+        }
+
+        private async Task SetOpponentTurnAsync()
+        {
+            StopMyTurn();
+
+            if (_isMyTurn)
+            {
+                if (await IsMyTurn())
                 {
-                    SetOpponentTurn();
+                    await SetPlayerTurnAsync();
+                    return;
                 }
             }
+
+            Dispatcher.Invoke(() =>
+            {
+                EnableOpponentBoard(false);
+                GameStatus.Text = "Ход противника...";
+            });
+
+            if (_networkService is ServerNetworkManager serverManager)
+            {
+                await serverManager.ForceUpdateBoards();
+            }
         }
 
-        // Запуск таймера хода
-        private void StartTurnTimer()
+        private async Task SetPlayerTurnAsync()
         {
-            _remainingTurnTime = 30;
-            TurnTimerContainer.Visibility = Visibility.Visible;
-            TurnTimeTextBlock.Text = $"⏱️ {_remainingTurnTime} сек";
-            //TurnStatusTextBlock.Text = "Ваш ход";
-            TurnTimerContainer.Background = new SolidColorBrush(Color.FromRgb(46, 204, 113));
-            _turnTimer.Start();
+            if (!_isMyTurn)
+            {
+                if (!await IsMyTurn())
+                {
+                    await SetOpponentTurnAsync();
+                    return;
+                }
+            }
+
+            StartMyTurn();
+
+            if (_networkService is ServerNetworkManager serverManager)
+            {
+                await serverManager.ForceUpdateBoards();
+            }
         }
 
-        // Остановка таймера хода
-        private void StopTurnTimer()
+        private async Task UpdateOpponentBoardAsync(bool forceReload = false)
         {
-            _turnTimer.Stop();
-            TurnTimerContainer.Visibility = Visibility.Collapsed;
+            try
+            {
+                if (forceReload)
+                {
+                    await LoadGameStateFromServer();
+                }
+
+                bool canShoot = await IsMyTurn() && _currentState == GameClientState.InGame;
+
+                Dispatcher.Invoke(() =>
+                {
+                    foreach (var kvp in _opponentCells)
+                    {
+                        var cell = kvp.Value;
+                        string cellKey = kvp.Key;
+
+                        if (cell.Tag is Tuple<string, CellState> tag)
+                        {
+                            var (_, cellState) = tag;
+
+                            cell.Background = cellState.GetCurrentColor();
+                            UpdateOpponentCellSymbol(cell, cellState);
+
+                            cell.IsEnabled = canShoot && !cellState.WasShot;
+                            cell.Cursor = cell.IsEnabled ? Cursors.Hand : Cursors.Arrow;
+                        }
+                    }
+
+                    Console.WriteLine($"🔄 Обновлено поле противника. Можно стрелять: {canShoot}");
+                });
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"❌ Ошибка обновления поля противника: {ex.Message}");
+            }
         }
 
-        // Установка хода противника
-        private void SetOpponentTurn()
+        private async Task UpdateAllBoardsAsync()
         {
-            EnableOpponentBoard(false);
-            GameStatus.Text = "Ход противника...";
-            StopTurnTimer();
-            UpdateAllBoards();
+            UpdatePlayerBoardVisual();
+            await UpdateOpponentBoardAsync(true);
         }
 
-        // Установка своего хода
-        private void SetPlayerTurn()
-        {
-            EnableOpponentBoard(true);
-            GameStatus.Text = "Ваш ход! Выберите клетку на поле противника";
-            StartTurnTimer();
-            UpdateAllBoards();
-        }
 
-        // Обновление состояния кнопок в зависимости от состояния игры
         private void UpdateButtonsState()
         {
             switch (_currentState)
             {
                 case GameClientState.PlacingShips:
-                    // Только в состоянии расстановки разрешаем менять корабли
                     RandomPlacementButton.IsEnabled = true;
                     ClearBoardButton.IsEnabled = true;
                     RandomOpponentButton.IsEnabled = _gameLogic.AllShipsPlaced;
@@ -233,34 +703,12 @@ namespace BattleShip.Client
 
                     RandomPlacementButton.Opacity = 1;
                     ClearBoardButton.Opacity = 1;
-
-                    if (_gameLogic.AllShipsPlaced)
-                    {
-                        RandomOpponentButton.Opacity = 1;
-                        PlayWithFriendButton.Opacity = 1;
-                    }
-                    else
-                    {
-                        RandomOpponentButton.Opacity = 0.5;
-                        PlayWithFriendButton.Opacity = 0.5;
-                    }
+                    RandomOpponentButton.Opacity = _gameLogic.AllShipsPlaced ? 1 : 0.5;
+                    PlayWithFriendButton.Opacity = _gameLogic.AllShipsPlaced ? 1 : 0.5;
                     break;
 
                 case GameClientState.SearchingGame:
-                    // При поиске блокируем ВСЕ кнопки
-                    RandomPlacementButton.IsEnabled = false;
-                    ClearBoardButton.IsEnabled = false;
-                    RandomOpponentButton.IsEnabled = false;
-                    PlayWithFriendButton.IsEnabled = false;
-
-                    RandomPlacementButton.Opacity = 0.5;
-                    ClearBoardButton.Opacity = 0.5;
-                    RandomOpponentButton.Opacity = 0.5;
-                    PlayWithFriendButton.Opacity = 0.5;
-                    break;
-
                 case GameClientState.InGame:
-                    // Во время игры блокируем кнопки расстановки
                     RandomPlacementButton.IsEnabled = false;
                     ClearBoardButton.IsEnabled = false;
                     RandomOpponentButton.IsEnabled = false;
@@ -273,7 +721,6 @@ namespace BattleShip.Client
                     break;
 
                 case GameClientState.GameFinished:
-                    // После игры снова разрешаем
                     RandomPlacementButton.IsEnabled = true;
                     ClearBoardButton.IsEnabled = true;
                     RandomOpponentButton.IsEnabled = true;
@@ -287,12 +734,11 @@ namespace BattleShip.Client
             }
         }
 
-        // Изменение состояния игры
-        private void SetGameState(GameClientState newState)
+        private async Task SetGameStateAsync(GameClientState newState)
         {
             _currentState = newState;
             UpdateButtonsState();
-            UpdateAllBoards(); 
+            await UpdateAllBoardsAsync();
 
             switch (newState)
             {
@@ -300,28 +746,28 @@ namespace BattleShip.Client
                     GameStatus.Text = "Расставьте свои корабли";
                     EnablePlayerBoard(true);
                     EnableOpponentBoard(false);
-                    StopTurnTimer();
+                    StopMyTurn();
                     break;
 
                 case GameClientState.SearchingGame:
                     GameStatus.Text = "🔍 Поиск случайного соперника...";
                     EnablePlayerBoard(false);
                     EnableOpponentBoard(false);
-                    StopTurnTimer();
+                    StopMyTurn();
                     break;
 
                 case GameClientState.InGame:
                     GameStatus.Text = "Игра началась!";
                     EnablePlayerBoard(false);
-                    UpdateAllBoards(); // Обновляем поля при начале игры
-                    StopTurnTimer();
+                    await UpdateAllBoardsAsync();
+                    StopMyTurn();
                     break;
 
                 case GameClientState.GameFinished:
                     GameStatus.Text = "Игра окончена";
                     EnablePlayerBoard(false);
                     EnableOpponentBoard(false);
-                    StopTurnTimer();
+                    StopMyTurn();
                     break;
             }
         }
@@ -350,11 +796,13 @@ namespace BattleShip.Client
 
         private async void ConnectToServer()
         {
-            string playerName = Application.Current.Properties.Contains("Username")
+            _playerName = Application.Current.Properties.Contains("Username")
                 ? Application.Current.Properties["Username"].ToString()
                 : "Игрок";
 
-            await _networkService.ConnectAsync(playerName);
+            await _networkService.ConnectAsync(_playerName);
+            _gameId = _networkService.GameId;
+            _playerId = _networkService.PlayerId;
         }
 
         private void EnableOpponentBoard(bool enable)
@@ -366,7 +814,6 @@ namespace BattleShip.Client
             }
         }
 
-        // ✅ ДОБАВЛЕНО: Включение/отключение своего поля
         private void EnablePlayerBoard(bool enable)
         {
             foreach (var cell in _playerCells.Values)
@@ -384,14 +831,14 @@ namespace BattleShip.Client
                     ConnectionStatus.Text = isConnected ? "Подключено" : "Не подключено";
                     if (isConnected && _currentState == GameClientState.PlacingShips)
                     {
-                        SetGameState(GameClientState.PlacingShips);
+                        _ = SetGameStateAsync(GameClientState.PlacingShips);
                     }
                 });
             };
 
-            _networkService.OnGameStarted += (startMessage) =>
+            _networkService.OnGameStarted += async (startMessage) =>
             {
-                Dispatcher.Invoke(() =>
+                await Dispatcher.Invoke(async () =>
                 {
                     _opponentName = !string.IsNullOrEmpty(startMessage.OpponentName)
                         ? startMessage.OpponentName
@@ -400,8 +847,24 @@ namespace BattleShip.Client
                     GameStatus.Text = $"Игра началась! Противник: {_opponentName}";
                     ConnectionStatus.Text = "В игре";
 
-                    // ✅ Устанавливаем состояние "В игре"
-                    SetGameState(GameClientState.InGame);
+                    _ = Task.Run(StartPeriodicUpdate);
+
+                    await LoadGameStateFromServer();
+                    await SetGameStateAsync(GameClientState.InGame);
+
+
+
+                    await Task.Delay(1000);
+
+                    bool isMyTurn = await IsMyTurn();
+                    if (isMyTurn)
+                    {
+                        await SetPlayerTurnAsync();
+                    }
+                    else
+                    {
+                        await SetOpponentTurnAsync();
+                    }
 
                     ChatWindowControl.AddSystemMessage($"Игра началась. Ваш соперник: {_opponentName}");
                     OpenChatButton.Visibility = Visibility.Visible;
@@ -413,10 +876,9 @@ namespace BattleShip.Client
 
             _networkService.OnGameEnded += (endMessage) =>
             {
-                Dispatcher.Invoke(() =>
+                Dispatcher.Invoke(async () =>
                 {
-                    // ✅ Устанавливаем состояние "Игра окончена"
-                    SetGameState(GameClientState.GameFinished);
+                    await SetGameStateAsync(GameClientState.GameFinished);
 
                     OpenChatButton.Visibility = Visibility.Collapsed;
                     ChatWindowControl.Visibility = Visibility.Collapsed;
@@ -449,74 +911,76 @@ namespace BattleShip.Client
                 });
             };
 
-
-            _networkService.OnShootResult += (result) =>
+            _networkService.OnShootResult += async (result) =>
             {
-                Dispatcher.Invoke(() =>
+                await Dispatcher.Invoke(async () =>
                 {
+                    Console.WriteLine($"=== UI: Получен результат выстрела ===");
+                    Console.WriteLine($"Клетка: {result.Row},{result.Col}, Результат: {result.Result}");
+                    Console.WriteLine($"Продолжает ход: {result.ContinueTurn}");
+
                     string cellKey = $"{result.Row},{result.Col}";
-
-                    Console.WriteLine($"=== UI: Обработка выстрела ===");
-                    Console.WriteLine($"Клетка: {cellKey}");
-                    Console.WriteLine($"Result: {result.Result}");
-                    Console.WriteLine($"ContinueTurn: {result.ContinueTurn}");
-
                     _playerShots.Add(cellKey);
 
-                    // Обновляем клетку противника
+                    // 1. Обновляем конкретную клетку для быстрой обратной связи
                     UpdateOpponentCellAfterShot(result.Row, result.Col, result.Result, result.ShipName);
+
+                    // 2. ЗАГРУЖАЕМ ПОЛНОЕ СОСТОЯНИЕ С СЕРВЕРА
+                    // Сервер уже пометил ВСЕ клетки вокруг потопленного корабля
+                    await LoadGameStateFromServer();
+
+                    // 3. Обновляем ВСЮ доску противника из данных сервера
+                    await UpdateOpponentBoardAsync(true); // forceReload = true
 
                     if (result.Result == "sunk")
                     {
-                        AddGameMessage($"Вы потопили {result.ShipName}!");
+                        ShowSpecialMessage($"Вы потопили {result.ShipName}!", 3000);
                     }
                     else if (result.Result == "hit")
                     {
-                        AddGameMessage("Попадание!");
+                        ShowSpecialMessage("Попадание!", 2000);
                     }
                     else if (result.Result == "miss")
                     {
-                        AddGameMessage("Промах!");
+                        ShowSpecialMessage("Промах!", 1500);
                     }
 
-                    // Проверяем, продолжается ли наш ход
+                    // 4. Проверяем, не окончена ли игра
+                    if (result.IsGameOver)
+                    {
+                        Console.WriteLine("🏁 Игра окончена из OnShootResult!");
+                        return;
+                    }
+
                     if (result.ContinueTurn)
                     {
-                        SetPlayerTurn(); // Продолжаем ход
+                        _remainingTurnTime = 30;
+                        UpdateTimerDisplay();
                     }
                     else
                     {
-                        SetOpponentTurn(); // Ход переходит противнику
-                    }
-
-                    // Проверяем конец игры
-                    if (result.IsGameOver)
-                    {
-                        // Игра окончена - сервер отправит OnGameEnded
+                        StopMyTurn();
+                        await SetOpponentTurnAsync();
                     }
                 });
             };
 
-            _networkService.OnOpponentShoot += (shoot) =>
+            _networkService.OnOpponentShoot += async (shoot) =>
             {
-                Dispatcher.Invoke(() =>
+                await Dispatcher.Invoke(async () =>
                 {
                     string cellKey = $"{shoot.Row},{shoot.Col}";
-
                     Console.WriteLine($"=== UI: Выстрел противника в {cellKey} ===");
 
                     _opponentShots.Add(cellKey);
 
+                    
+                    Console.WriteLine("🔄 Загружаем состояние с сервера после выстрела противника...");
+                    await LoadGameStateFromServer();
+
                     if (shoot.IsHit)
                     {
                         _hitsOnPlayer.Add(cellKey);
-                    }
-
-                    // Обновляем свое поле
-                    UpdatePlayerCellAfterShot(shoot.Row, shoot.Col, shoot.IsHit);
-
-                    if (shoot.IsHit)
-                    {
                         ShowSpecialMessage($"Противник попал в ваш корабль!", 3000);
                     }
                     else
@@ -524,33 +988,37 @@ namespace BattleShip.Client
                         ShowSpecialMessage("Противник промахнулся!", 2000);
                     }
 
-                    // После выстрела противника - наш ход
-                    SetPlayerTurn();
+                    await Task.Delay(1000);
+                    await CheckAndUpdateTurn();
                 });
             };
 
-            _networkService.OnGameStateUpdated += (state) =>
+            _networkService.OnGameStateUpdated += async (state) =>
             {
-                Dispatcher.Invoke(() =>
+                await Dispatcher.Invoke(async () =>
                 {
                     if (_showingSpecialMessage) return;
 
+                    Console.WriteLine($"=== UI: Обновление состояния игры ===");
+                    Console.WriteLine($"Статус: {state.Status}, Ход: {state.CurrentTurn}");
+
                     if (state.Status == "playing")
                     {
-                        if (state.CurrentTurn == "player")
+                        if (state.CurrentTurn == "player" && !_isMyTurn)
                         {
-                            SetPlayerTurn();
+                            await SetPlayerTurnAsync();
                         }
-                        else
+                        else if (state.CurrentTurn == "opponent" && _isMyTurn)
                         {
-                            SetOpponentTurn();
+                            await SetOpponentTurnAsync();
                         }
                     }
                     else if (state.Status == "finished")
                     {
-                        StopTurnTimer();
+                        StopMyTurn();
                         EnableOpponentBoard(false);
                         EnablePlayerBoard(false);
+                        GameStatus.Text = "Игра окончена";
                     }
                 });
             };
@@ -574,7 +1042,7 @@ namespace BattleShip.Client
                         }
 
                         GameStatus.Text = "Сервер недоступен. Игра завершена.";
-                        StopTurnTimer();
+                        StopMyTurn();
 
                         Task.Delay(5000).ContinueWith(_ =>
                         {
@@ -603,7 +1071,7 @@ namespace BattleShip.Client
                     }
 
                     GameStatus.Text = "Противник отключился";
-                    StopTurnTimer();
+                    StopMyTurn();
                 });
             };
 
@@ -637,66 +1105,29 @@ namespace BattleShip.Client
             };
         }
 
-        private void UpdateAllBoards()
+        private async Task CheckAndUpdateTurn()
         {
-            UpdatePlayerBoardVisual();
-            UpdateOpponentBoard();
-        }
-
-        private void SyncCellStateWithData(CellState cellState, int row, int col, string cellKey, bool isPlayerCell)
-        {
-            if (isPlayerCell)
+            try
             {
-                // Для своего поля: проверяем реальные данные
-                bool hasShip = _gameLogic.GetPlayerShipCells()
-                    .Any(c => c.row == row && c.col == col);
-
-                cellState.HasShip = hasShip;
-                cellState.IsHit = _hitsOnPlayer.Contains(cellKey);
-                cellState.IsMiss = _opponentShots.Contains(cellKey);
-
-                // Обновляем цвет в соответствии с состоянием
-                if (cellState.IsHit)
+                var gameState = await _networkService.GetUpdatedGameStateAsync();
+                if (gameState != null && gameState.Status == "playing")
                 {
-                    cellState.BaseColor = cellState.IsSunk ? Brushes.DarkRed : Brushes.Red;
-                }
-                else if (cellState.IsMiss)
-                {
-                    cellState.BaseColor = Brushes.LightBlue;
-                }
-                else if (hasShip)
-                {
-                    cellState.BaseColor = Brushes.DarkGray;
-                }
-                else
-                {
-                    cellState.BaseColor = new SolidColorBrush(Color.FromRgb(40, 50, 60));
+                    if (gameState.CurrentTurn == "player")
+                    {
+                        await SetPlayerTurnAsync();
+                    }
+                    else
+                    {
+                        await SetOpponentTurnAsync();
+                    }
                 }
             }
-            else
+            catch (Exception ex)
             {
-                // Для поля противника: только выстрелы
-                cellState.HasShip = false;
-                cellState.IsHit = _hitsOnOpponent.Contains(cellKey);
-                cellState.IsMiss = _playerShots.Contains(cellKey) && !cellState.IsHit;
-
-                if (cellState.IsHit)
-                {
-                    cellState.BaseColor = Brushes.Red;
-                }
-                else if (cellState.IsMiss)
-                {
-                    cellState.BaseColor = Brushes.LightGray;
-                }
-                else
-                {
-                    cellState.BaseColor = new SolidColorBrush(Color.FromRgb(40, 50, 60));
-                }
+                Console.WriteLine($"Ошибка проверки хода: {ex.Message}");
             }
         }
 
-
-        // Метод для обновления клетки на доске противника после выстрела
         private void UpdateOpponentCellAfterShot(int row, int col, string result, string shipName = "")
         {
             string cellKey = $"{row},{col}";
@@ -712,223 +1143,75 @@ namespace BattleShip.Client
                     case "hit":
                         cellState.IsHit = true;
                         cellState.IsMiss = false;
-                        cellState.BaseColor = Brushes.Red;
+                        cell.Background = Brushes.Red;
                         _hitsOnOpponent.Add(cellKey);
-                        ShowCellSymbol(cell, "✖", Brushes.White); // Символ попадания
+                        ShowCellSymbol(cell, "✖", Brushes.White);
                         break;
 
                     case "sunk":
                         cellState.IsHit = true;
                         cellState.IsSunk = true;
-                        cellState.BaseColor = Brushes.DarkRed;
+                        cell.Background = Brushes.DarkRed;
                         _hitsOnOpponent.Add(cellKey);
-                        ShowCellSymbol(cell, "☠", Brushes.White); // Символ потопления
+                        ShowCellSymbol(cell, "☠", Brushes.White);
 
-                        // Помечаем клетки вокруг потопленного корабля
-                        MarkCellsAroundSunkShip(row, col, false);
+                        
+                        Console.WriteLine($"💥 Потоплен корабль {shipName} на поле противника!");
                         break;
 
                     case "miss":
                         cellState.IsMiss = true;
                         cellState.IsHit = false;
-                        cellState.BaseColor = Brushes.LightGray;
-                        ShowCellSymbol(cell, "○", Brushes.DarkGray); // Символ промаха
+                        cell.Background = Brushes.LightGray;
+                        ShowCellSymbol(cell, "○", Brushes.DarkGray);
                         break;
                 }
 
-                cell.Background = cellState.GetCurrentColor();
-                cell.IsEnabled = false; // Делаем клетку неактивной после выстрела
+                cell.IsEnabled = false;
             }
-        }
-
-        // Метод для обновления клетки на своей доске после выстрела противника
-        private void UpdatePlayerCellAfterShot(int row, int col, bool isHit)
-        {
-            string cellKey = $"{row},{col}";
-
-            if (!_playerCells.TryGetValue(cellKey, out Border cell)) return;
-
-            if (cell.Tag is Tuple<string, CellState> tag)
-            {
-                var (_, cellState) = tag;
-
-                if (isHit)
-                {
-                    cellState.IsHit = true;
-                    cellState.BaseColor = Brushes.Red;
-                    _hitsOnPlayer.Add(cellKey);
-                    ShowCellSymbol(cell, "✖", Brushes.White);
-
-                    // Проверяем, потоплен ли корабль
-                    if (IsShipSunkAt(row, col, true))
-                    {
-                        cellState.IsSunk = true;
-                        cellState.BaseColor = Brushes.DarkRed;
-                        ShowCellSymbol(cell, "☠", Brushes.White);
-                        MarkCellsAroundSunkShip(row, col, true);
-                    }
-                }
-                else
-                {
-                    cellState.IsMiss = true;
-                    cellState.BaseColor = Brushes.LightBlue;
-                    ShowCellSymbol(cell, "○", Brushes.DarkGray);
-                }
-
-                cell.Background = cellState.GetCurrentColor();
-
-                // Обновляем символ на поле
-                UpdatePlayerCellSymbol(cell, cellState);
-            }
-        }
-
-        // Помечаем клетки вокруг потопленного корабля
-        private void MarkCellsAroundSunkShip(int centerRow, int centerCol, bool onPlayerBoard)
-        {
-            for (int dx = -1; dx <= 1; dx++)
-            {
-                for (int dy = -1; dy <= 1; dy++)
-                {
-                    int row = centerRow + dx;
-                    int col = centerCol + dy;
-
-                    if (row >= 0 && row < 10 && col >= 0 && col < 10)
-                    {
-                        string cellKey = $"{row},{col}";
-
-                        // Пропускаем саму клетку корабля
-                        if (dx == 0 && dy == 0) continue;
-
-                        if (onPlayerBoard)
-                        {
-                            if (_playerCells.TryGetValue(cellKey, out Border cell))
-                            {
-                                if (cell.Tag is Tuple<string, CellState> tag)
-                                {
-                                    var (_, cellState) = tag;
-
-                                    // Если это не клетка корабля и еще не отмечена
-                                    if (!cellState.HasShip && !cellState.IsMiss)
-                                    {
-                                        cellState.IsMiss = true;
-                                        cellState.IsAroundSunk = true;
-                                        cellState.BaseColor = Brushes.LightGray;
-                                        cell.Background = cellState.GetCurrentColor();
-                                    }
-                                }
-                            }
-                        }
-                        else
-                        {
-                            if (_opponentCells.TryGetValue(cellKey, out Border cell))
-                            {
-                                if (cell.Tag is Tuple<string, CellState> tag)
-                                {
-                                    var (_, cellState) = tag;
-
-                                    // Если еще не стреляли сюда
-                                    if (!cellState.IsHit && !cellState.IsMiss)
-                                    {
-                                        cellState.IsMiss = true;
-                                        cellState.IsAroundSunk = true;
-                                        cellState.BaseColor = Brushes.LightGray;
-                                        cell.Background = cellState.GetCurrentColor();
-                                        cell.IsEnabled = false; // Делаем неактивной
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        // Проверка, потоплен ли корабль 
-        private bool IsShipSunkAt(int row, int col, bool onPlayerBoard)
-        {
-            // В реальной реализации нужно проверять весь корабль
-            // Здесь упрощенно - если все соседние клетки корабля попадания
-            string cellKey = $"{row},{col}";
-
-            if (onPlayerBoard)
-            {
-                // Проверяем все 4 направления
-                int[] dx = { 0, 1, 0, -1 };
-                int[] dy = { 1, 0, -1, 0 };
-
-                for (int i = 0; i < 4; i++)
-                {
-                    int nr = row + dx[i];
-                    int nc = col + dy[i];
-                    string neighborKey = $"{nr},{nc}";
-
-                    if (nr >= 0 && nr < 10 && nc >= 0 && nc < 10)
-                    {
-                        if (_playerCells.TryGetValue(neighborKey, out Border neighborCell))
-                        {
-                            if (neighborCell.Tag is Tuple<string, CellState> neighborTag)
-                            {
-                                var (_, neighborState) = neighborTag;
-                                if (neighborState.HasShip && !neighborState.IsHit)
-                                {
-                                    return false; // Есть неподбитая клетка корабля
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-
-            return true; // Все клетки корабля подбиты 
         }
 
         private void UpdatePlayerBoardVisual()
         {
-            Console.WriteLine("=== Обновление визуализации своего поля ===");
-
             foreach (var kvp in _playerCells)
             {
                 var cell = kvp.Value;
-                var coords = kvp.Key.Split(',');
-                int row = int.Parse(coords[0]);
-                int col = int.Parse(coords[1]);
-                string cellKey = kvp.Key;
-
                 if (cell.Tag is Tuple<string, CellState> tag)
                 {
                     var (_, cellState) = tag;
-
-                    // Синхронизируем состояние с реальными данными
-                    SyncCellStateWithData(cellState, row, col, cellKey, true);
-
-                    // Обновляем символ
-                    UpdatePlayerCellSymbol(cell, cellState);
-
-                    // Обновляем цвет
                     cell.Background = cellState.GetCurrentColor();
+                    UpdatePlayerCellSymbol(cell, cellState);
                 }
             }
-
-            Console.WriteLine($"Попаданий по вам: {_hitsOnPlayer.Count}, Промахов противника: {_opponentShots.Count}");
         }
 
         private void UpdatePlayerCellSymbol(Border cell, CellState cellState)
         {
             if (cell.Child is TextBlock textBlock)
             {
-                if (cellState.IsHit && cellState.IsSunk)
+                // 1. В первую очередь - клетки вокруг потопленных кораблей
+                if (cellState.IsAroundSunk && !cellState.HasShip)
+                {
+                    textBlock.Text = "○";
+                    textBlock.Foreground = Brushes.DarkGray;
+                    textBlock.Visibility = Visibility.Visible;
+                }
+                // 2. Потом потопленные клетки кораблей
+                else if (cellState.IsSunk && cellState.HasShip)
                 {
                     textBlock.Text = "☠";
                     textBlock.Foreground = Brushes.White;
                     textBlock.Visibility = Visibility.Visible;
                 }
-                else if (cellState.IsHit)
+                // 3. Попадания (но не потопленные)
+                else if (cellState.IsHit && cellState.HasShip && !cellState.IsSunk)
                 {
                     textBlock.Text = "✖";
                     textBlock.Foreground = Brushes.White;
                     textBlock.Visibility = Visibility.Visible;
                 }
-                else if (cellState.IsMiss)
+                // 4. Обычные промахи
+                else if (cellState.IsMiss && !cellState.HasShip && !cellState.IsAroundSunk)
                 {
                     textBlock.Text = "○";
                     textBlock.Foreground = Brushes.DarkGray;
@@ -941,7 +1224,97 @@ namespace BattleShip.Client
             }
         }
 
+        private void ShowCellSymbol(Border cell, string symbol, Brush color)
+        {
+            if (cell.Child is TextBlock existingTextBlock)
+            {
+                existingTextBlock.Text = symbol;
+                existingTextBlock.Foreground = color;
+                existingTextBlock.Visibility = Visibility.Visible;
+                existingTextBlock.HorizontalAlignment = HorizontalAlignment.Center;
+                existingTextBlock.VerticalAlignment = VerticalAlignment.Center;
+                existingTextBlock.FontSize = 16;
+                existingTextBlock.FontWeight = FontWeights.Bold;
+            }
+            else
+            {
+                var textBlock = new TextBlock
+                {
+                    Text = symbol,
+                    Foreground = color,
+                    Visibility = Visibility.Visible,
+                    HorizontalAlignment = HorizontalAlignment.Center,
+                    VerticalAlignment = VerticalAlignment.Center,
+                    FontSize = 16,
+                    FontWeight = FontWeights.Bold
+                };
+                cell.Child = textBlock;
+            }
+        }
 
+        private void UpdateOpponentCellSymbol(Border cell, CellState cellState)
+        {
+            if (cell.Child is TextBlock textBlock)
+            {
+                // 1. Клетки вокруг потопленных кораблей противника
+                if (cellState.IsAroundSunk && !cellState.HasShip)
+                {
+                    textBlock.Text = "○";
+                    textBlock.Foreground = Brushes.DarkGray;
+                    textBlock.Visibility = Visibility.Visible;
+                    Console.WriteLine($"   ✅ Отображение IsAroundSunk на поле противника");
+                }
+                // 2. Потопленные клетки кораблей противника
+                else if (cellState.IsSunk && cellState.HasShip)
+                {
+                    textBlock.Text = "☠";
+                    textBlock.Foreground = Brushes.White;
+                    textBlock.Visibility = Visibility.Visible;
+                }
+                // 3. Попадания по кораблям противника
+                else if (cellState.IsHit && cellState.HasShip && !cellState.IsSunk)
+                {
+                    textBlock.Text = "✖";
+                    textBlock.Foreground = Brushes.White;
+                    textBlock.Visibility = Visibility.Visible;
+                }
+                // 4. Обычные промахи по противнику
+                else if (cellState.IsMiss && !cellState.HasShip && !cellState.IsAroundSunk)
+                {
+                    textBlock.Text = "○";
+                    textBlock.Foreground = Brushes.DarkGray;
+                    textBlock.Visibility = Visibility.Visible;
+                }
+                else
+                {
+                    textBlock.Visibility = Visibility.Hidden;
+                }
+            }
+        }
+
+        private async Task<bool> IsMyTurn()
+        {
+            try
+            {
+                if (!_networkService.IsInGame)
+                    return false;
+
+                var gameState = await _networkService.GetUpdatedGameStateAsync();
+                if (gameState == null)
+                {
+                    return _isMyTurn;
+                }
+
+                bool isMyTurn = gameState.CurrentTurn == "player";
+                Console.WriteLine($"✅ Проверка хода: сервер говорит {isMyTurn}");
+                return isMyTurn;
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"⚠️ Ошибка проверки хода: {ex.Message}");
+                return _isMyTurn;
+            }
+        }
 
         private async void ChatWindowControl_MessageSent(object sender, string message)
         {
@@ -980,10 +1353,9 @@ namespace BattleShip.Client
             UpdateUnreadBadge();
         }
 
-        private void ResetGameForNewRound()
+        private async void ResetGameForNewRound()
         {
-            // ✅ Возвращаем в состояние расстановки кораблей
-            SetGameState(GameClientState.PlacingShips);
+            await SetGameStateAsync(GameClientState.PlacingShips);
 
             _gameLogic.ResetForNewGame();
 
@@ -1008,7 +1380,7 @@ namespace BattleShip.Client
 
             UpdateShipsInfo();
 
-            _networkService.LeaveGameAsync();
+            await _networkService.LeaveGameAsync();
 
             GameStatus.Text = "Новая игра! Расставьте корабли.";
             _unreadMessages = 0;
@@ -1049,10 +1421,9 @@ namespace BattleShip.Client
                 _messageTimer.Stop();
                 _showingSpecialMessage = false;
 
-                // Восстанавливаем статус в зависимости от состояния
                 if (_currentState == GameClientState.InGame)
                 {
-                    GameStatus.Text = "Ваш ход!";
+                    GameStatus.Text = _isMyTurn ? "Ваш ход!" : "Ход противника...";
                 }
                 else
                 {
@@ -1063,45 +1434,12 @@ namespace BattleShip.Client
             _messageTimer.Start();
         }
 
-        private void UpdateUIForGameState(GameStateMessage state)
-        {
-            if (_showingSpecialMessage) return;
-
-            switch (state.Status)
-            {
-                case "placing":
-                    GameStatus.Text = "Расставьте свои корабли";
-                    OpenChatButton.Visibility = Visibility.Collapsed;
-                    EnableOpponentBoard(false);
-                    break;
-                case "playing":
-                    if (state.CurrentTurn == "player")
-                    {
-                        GameStatus.Text = "Ваш ход! Выберите клетку на поле противника";
-                        OpenChatButton.Visibility = Visibility.Visible;
-                        EnableOpponentBoard(true);
-                    }
-                    else
-                    {
-                        GameStatus.Text = "Ход противника...";
-                        OpenChatButton.Visibility = Visibility.Visible;
-                        EnableOpponentBoard(false);
-                    }
-                    break;
-                case "finished":
-                    EnableOpponentBoard(false);
-                    EnablePlayerBoard(false);
-                    break;
-            }
-        }
-
         private void InitializeGameBoards()
         {
             InitializeBoard(YourBoardGrid, true);
             InitializeBoard(OpponentBoardGrid, false);
             UpdateShipsInfo();
 
-            // Инициализируем все клетки противника как неактивные
             foreach (var cell in _opponentCells.Values)
             {
                 cell.Background = new SolidColorBrush(Color.FromRgb(40, 50, 60));
@@ -1199,7 +1537,7 @@ namespace BattleShip.Client
                 BorderBrush = new SolidColorBrush(Color.FromRgb(79, 92, 110)),
                 BorderThickness = new Thickness(1),
                 Background = cellState.BaseColor,
-                Tag = new Tuple<string, CellState>($"{row},{col}", cellState), // ← ВЕРНУЛИ старый Tag
+                Tag = new Tuple<string, CellState>($"{row},{col}", cellState),
                 Cursor = isYourBoard ? Cursors.Hand : Cursors.Arrow
             };
 
@@ -1220,64 +1558,15 @@ namespace BattleShip.Client
             return cell;
         }
 
-        private void ShowCellSymbol(Border cell, string symbol, Brush color)
-        {
-            // Проверяем, есть ли уже TextBlock в клетке
-            if (cell.Child is TextBlock existingTextBlock)
-            {
-                existingTextBlock.Text = symbol;
-                existingTextBlock.Foreground = color;
-                existingTextBlock.Visibility = Visibility.Visible;
-                existingTextBlock.HorizontalAlignment = HorizontalAlignment.Center;
-                existingTextBlock.VerticalAlignment = VerticalAlignment.Center;
-                existingTextBlock.FontSize = 16;
-                existingTextBlock.FontWeight = FontWeights.Bold;
-            }
-            else
-            {
-                // Создаем новый TextBlock
-                var textBlock = new TextBlock
-                {
-                    Text = symbol,
-                    Foreground = color,
-                    Visibility = Visibility.Visible,
-                    HorizontalAlignment = HorizontalAlignment.Center,
-                    VerticalAlignment = VerticalAlignment.Center,
-                    FontSize = 16,
-                    FontWeight = FontWeights.Bold
-                };
-                cell.Child = textBlock;
-            }
-        }
-
         private void Cell_MouseEnter(object sender, MouseEventArgs e)
         {
             var cell = (Border)sender;
 
             if (cell.Tag is Tuple<string, CellState> tag)
             {
-                var (coordsStr, cellState) = tag;
-
-                // Определяем, на чье поле навели
-                bool isPlayerCell = _playerCells.ContainsKey(coordsStr);
-
-                if (isPlayerCell)
-                {
-                    // Только для своего поля обновляем состояние
-                    var coords = coordsStr.Split(',');
-                    int row = int.Parse(coords[0]);
-                    int col = int.Parse(coords[1]);
-
-                    // Только подсветка, не меняем базовые данные
-                    cellState.IsHighlighted = true;
-                    cell.Background = cellState.GetCurrentColor();
-                }
-                else
-                {
-                    // Для поля противника - только подсветка
-                    cellState.IsHighlighted = true;
-                    cell.Background = cellState.GetCurrentColor();
-                }
+                var (_, cellState) = tag;
+                cellState.IsHighlighted = true;
+                cell.Background = cellState.GetCurrentColor();
             }
         }
 
@@ -1287,9 +1576,7 @@ namespace BattleShip.Client
 
             if (cell.Tag is Tuple<string, CellState> tag)
             {
-                var (coordsStr, cellState) = tag;
-
-                // Просто сбрасываем подсветку
+                var (_, cellState) = tag;
                 cellState.IsHighlighted = false;
                 cell.Background = cellState.GetCurrentColor();
             }
@@ -1299,7 +1586,6 @@ namespace BattleShip.Client
         {
             if (isPlayerCell)
             {
-                // Только для своего поля
                 bool isCurrentShipCell = _gameLogic.GetCurrentShipBeingPlacedCells()
                     .Any(c => c.row == row && c.col == col);
                 bool hasShip = _gameLogic.GetPlayerShipCells()
@@ -1333,8 +1619,7 @@ namespace BattleShip.Client
             }
             else
             {
-                // ДЛЯ ПОЛЯ ПРОТИВНИКА: только выстрелы, без информации о кораблях!
-                cellState.HasShip = false; // никогда не показываем корабли противника
+                cellState.HasShip = false;
                 cellState.IsPlacing = false;
                 cellState.IsHit = _hitsOnOpponent.Contains(cellKey);
                 cellState.IsMiss = _playerShots.Contains(cellKey) && !_hitsOnOpponent.Contains(cellKey);
@@ -1356,7 +1641,6 @@ namespace BattleShip.Client
 
         private void YourCell_MouseLeftButtonDown(object sender, MouseButtonEventArgs e)
         {
-            // ✅ Проверяем, можно ли расставлять корабли в текущем состоянии
             if (_currentState != GameClientState.PlacingShips) return;
 
             var cell = (Border)sender;
@@ -1388,7 +1672,6 @@ namespace BattleShip.Client
 
         private void YourCell_MouseRightButtonDown(object sender, MouseButtonEventArgs e)
         {
-            // ✅ Проверяем, можно ли изменять корабли в текущем состоянии
             if (_currentState != GameClientState.PlacingShips) return;
 
             var cell = (Border)sender;
@@ -1410,21 +1693,66 @@ namespace BattleShip.Client
             }
         }
 
-        private async void OpponentCell_MouseLeftButtonDown(object sender, MouseButtonEventArgs e)
+        private async void OpponentCell_MouseLeftButtonDown(object sender, RoutedEventArgs e)
         {
-            // ✅ Проверяем, можно ли стрелять в текущем состоянии
             if (_currentState != GameClientState.InGame) return;
+
+            if (!await IsMyTurn())
+            {
+                ShowSpecialMessage("Сейчас не ваш ход!", 2000);
+                return;
+            }
 
             var cell = (Border)sender;
 
             if (cell.Tag is Tuple<string, CellState> tag)
             {
-                var (coordsStr, _) = tag;
+                var (coordsStr, cellState) = tag;
+
+                if (cellState.WasShot || cellState.IsAroundSunk)
+                {
+                    ShowSpecialMessage("Сюда уже стреляли!", 2000);
+                    return;
+                }
+
                 var coords = coordsStr.Split(',');
                 int row = int.Parse(coords[0]);
                 int col = int.Parse(coords[1]);
 
-                await _networkService.ShootAsync(row, col);
+                bool success = await _networkService.ShootAsync(row, col);
+
+                if (success)
+                {
+
+                    await Task.Delay(500);
+
+                    if (_networkService is ServerNetworkManager serverManager)
+                    {
+                        await serverManager.ForceUpdateBoards();
+                    }
+
+                    cell.IsEnabled = false;
+                }
+            }
+        }
+
+        private async void StartPeriodicUpdate()
+        {
+            while (_currentState == GameClientState.InGame)
+            {
+                await Task.Delay(3000); // Обновляем каждые 3 секунды
+
+                try
+                {
+                    if (_networkService is ServerNetworkManager serverManager)
+                    {
+                        await serverManager.ForceUpdateBoards();
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"⚠️ Ошибка периодического обновления: {ex.Message}");
+                }
             }
         }
 
@@ -1442,86 +1770,11 @@ namespace BattleShip.Client
                 {
                     var (coordsStr, cellState) = tag;
 
-                    // Обновляем состояние
                     UpdateCellState(cellState, row, col, coordsStr, true);
-
-                    // Обновляем цвет
                     cell.Background = cellState.GetCurrentColor();
-
-                    // Обновляем символы для попаданий
                     UpdatePlayerCellSymbol(cell, cellState);
                 }
             }
-        }
-
-        private void UpdateOpponentBoard()
-        {
-            Console.WriteLine("=== Обновление визуализации поля противника ===");
-
-            foreach (var kvp in _opponentCells)
-            {
-                var cell = kvp.Value;
-                var coords = kvp.Key.Split(',');
-                int row = int.Parse(coords[0]);
-                int col = int.Parse(coords[1]);
-                string cellKey = kvp.Key;
-
-                if (cell.Tag is Tuple<string, CellState> tag)
-                {
-                    var (_, cellState) = tag;
-
-                    // Синхронизируем состояние с реальными данными
-                    SyncCellStateWithData(cellState, row, col, cellKey, false);
-
-                    // Обновляем символ
-                    UpdateOpponentCellSymbol(cell, cellState);
-
-                    // Обновляем цвет
-                    cell.Background = cellState.GetCurrentColor();
-
-                    // Обновляем активность клетки
-                    cell.IsEnabled = !cellState.IsHit && !cellState.IsMiss &&
-                                    _currentState == GameClientState.InGame &&
-                                    IsMyTurn();
-                }
-            }
-        }
-
-        private void UpdateOpponentCellSymbol(Border cell, CellState cellState)
-        {
-            if (cell.Child is TextBlock textBlock)
-            {
-                if (cellState.IsHit && cellState.IsSunk)
-                {
-                    textBlock.Text = "☠";
-                    textBlock.Foreground = Brushes.White;
-                    textBlock.Visibility = Visibility.Visible;
-                }
-                else if (cellState.IsHit)
-                {
-                    textBlock.Text = "✖";
-                    textBlock.Foreground = Brushes.White;
-                    textBlock.Visibility = Visibility.Visible;
-                }
-                else if (cellState.IsMiss)
-                {
-                    textBlock.Text = "○";
-                    textBlock.Foreground = Brushes.DarkGray;
-                    textBlock.Visibility = Visibility.Visible;
-                }
-                else
-                {
-                    textBlock.Visibility = Visibility.Hidden;
-                }
-            }
-        }
-
-        private bool IsMyTurn()
-        {
-            // Проверяем, чей сейчас ход
-            return GameStatus.Text.Contains("Ваш ход") ||
-                   GameStatus.Text.Contains("Попадание") ||
-                   (_currentState == GameClientState.InGame && GameStatus.Text.Contains("Ход противника") == false);
         }
 
         private void UpdateShipsInfo()
@@ -1546,7 +1799,6 @@ namespace BattleShip.Client
 
         private void RandomPlacementButton_Click(object sender, RoutedEventArgs e)
         {
-            // ✅ Проверяем, можно ли расставлять корабли
             if (_currentState != GameClientState.PlacingShips) return;
 
             _gameLogic.RandomlyPlaceShips();
@@ -1558,7 +1810,6 @@ namespace BattleShip.Client
 
         private async void ClearBoardButton_Click(object sender, RoutedEventArgs e)
         {
-            // ✅ Проверяем, можно ли очищать поле
             if (_currentState != GameClientState.PlacingShips) return;
 
             _gameLogic.ClearBoard();
@@ -1623,23 +1874,18 @@ namespace BattleShip.Client
                 return;
             }
 
-            // Переходим в состояние поиска игры
-            SetGameState(GameClientState.SearchingGame);
-
+            await SetGameStateAsync(GameClientState.SearchingGame);
             StartSearch();
 
-            // Запускаем поиск игры
             var gameId = await _networkService.CreateGameAsync("random");
 
             if (gameId != null)
             {
-                // Немедленно нашли игру
                 CancelSearch();
-                SetGameState(GameClientState.InGame);
+                await SetGameStateAsync(GameClientState.InGame);
             }
             else
             {
-                // В лобби - ждем
                 Console.WriteLine("⏳ В лобби, ждем противника...");
             }
         }
@@ -1668,8 +1914,7 @@ namespace BattleShip.Client
             OpenChatButton.Visibility = Visibility.Collapsed;
             SearchIndicator.Visibility = Visibility.Collapsed;
 
-            // Возвращаем в состояние расстановки кораблей
-            SetGameState(GameClientState.PlacingShips);
+            _ = SetGameStateAsync(GameClientState.PlacingShips);
         }
 
         protected override void OnClosing(System.ComponentModel.CancelEventArgs e)
@@ -1685,7 +1930,7 @@ namespace BattleShip.Client
                 var result = MessageBox.Show("Вы в игре. Выйти из игры?",
                     "Подтверждение",
                     MessageBoxButton.YesNo,
-                    MessageBoxImage.Question);
+                    MessageBoxImage.Question);  
 
                 if (result != MessageBoxResult.Yes)
                 {

@@ -2,6 +2,7 @@
 using BattleShip.Server.Services;
 using BattleShip.Server.Config;
 using Microsoft.Extensions.Logging;
+using Firebase.Database;
 
 namespace BattleShip.Server
 {
@@ -23,9 +24,37 @@ namespace BattleShip.Server
             builder.Services.AddSwaggerGen();
             builder.Services.AddSignalR();
 
-            // Регистрируем наши сервисы с правильным порядком:
+            //  РЕГИСТРАЦИЯ FirebaseClient 
+            builder.Services.AddSingleton<FirebaseClient>(provider =>
+            {
+                var databaseUrl = FirebaseConfig.DatabaseUrl;
+                var logger = provider.GetRequiredService<ILogger<Program>>();
+
+                logger.LogInformation($"🌐 Создаем FirebaseClient для: {databaseUrl}");
+
+                try
+                {
+                    var client = new FirebaseClient(databaseUrl, new FirebaseOptions
+                    {
+                        AuthTokenAsyncFactory = () => Task.FromResult<string>(null)
+                    });
+
+                    logger.LogInformation("✅ FirebaseClient создан успешно");
+                    return client;
+                }
+                catch (Exception ex)
+                {
+                    logger.LogError(ex, "❌ Ошибка создания FirebaseClient");
+                    throw;
+                }
+            });
+
+            // РЕГИСТРАЦИЯ СЕРВИСОВ 
             builder.Services.AddSingleton<FirebaseService>();
+            builder.Services.AddSingleton<SessionService>();
+            builder.Services.AddScoped<MatchmakingService>();
             builder.Services.AddScoped<GameService>();
+            //builder.Services.AddHostedService<HeartbeatService>();
 
             // Добавляем CORS для клиента WPF
             builder.Services.AddCors(options =>

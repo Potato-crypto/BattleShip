@@ -21,7 +21,7 @@ namespace BattleShip.Client
                 if (Application.Current.Properties.Contains("IsGuest") && 
                     (bool)Application.Current.Properties["IsGuest"])
                 {
-                    // Открываем GameWindow
+
                     GameWindow gameWindow = new GameWindow();
                     gameWindow.Show();
                     

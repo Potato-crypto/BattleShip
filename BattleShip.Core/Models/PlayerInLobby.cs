@@ -15,5 +15,7 @@ namespace BattleShip.Core.Models
 
         [JsonPropertyName("joinedAt")]
         public DateTime JoinedAt { get; set; } = DateTime.UtcNow;
+        [JsonPropertyName("sessionId")]
+        public string SessionId { get; set; }
     }
 }

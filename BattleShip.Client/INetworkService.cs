@@ -19,6 +19,7 @@ namespace BattleShip.Client
         event Action<string> OnOpponentDisconnected;
 
 
+
         // Статусы
         bool IsConnected { get; }
         bool IsInGame { get; }
@@ -36,7 +37,8 @@ namespace BattleShip.Client
         
         Task<bool> SendShipsPlacementAsync(List<ShipData> ships);
         Task<bool> ShootAsync(int row, int col);
-        
+
+        Task<GameStateMessage> GetUpdatedGameStateAsync();
         // Чат
         Task SendChatMessageAsync(string message);
         // Удаляем дублирующее событие OnChatMessageReceived

@@ -11,6 +11,8 @@
         Player1Won,
         Player2Won,
         Draw,
-        Abandoned
+        Abandoned,
+        WaitingForStart,
+        Aborted
     }
 }

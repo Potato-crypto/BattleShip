@@ -22,7 +22,18 @@ namespace BattleShip.Server
             builder.Services.AddControllers();
             builder.Services.AddEndpointsApiExplorer();
             builder.Services.AddSwaggerGen();
-            builder.Services.AddSignalR();
+
+            // Добавляем SignalR с правильными настройками
+            builder.Services.AddSignalR(options =>
+            {
+                options.EnableDetailedErrors = true;
+                options.MaximumReceiveMessageSize = 102400; // 100KB
+                options.ClientTimeoutInterval = TimeSpan.FromSeconds(30);
+                options.KeepAliveInterval = TimeSpan.FromSeconds(15);
+            });
+
+            // Регистрация ChatHub с логгером
+            builder.Services.AddSingleton<ChatHub>();
 
             //  РЕГИСТРАЦИЯ FirebaseClient 
             builder.Services.AddSingleton<FirebaseClient>(provider =>
@@ -56,14 +67,22 @@ namespace BattleShip.Server
             builder.Services.AddScoped<GameService>();
             //builder.Services.AddHostedService<HeartbeatService>();
 
-            // Добавляем CORS для клиента WPF
+            // Добавляем CORS для клиента WPF (ОБНОВЛЕНО)
             builder.Services.AddCors(options =>
             {
                 options.AddPolicy("AllowAll", builder =>
                 {
-                    builder.AllowAnyOrigin()
+                    builder.WithOrigins(
+                            "http://localhost:5214",    // Ваш сервер
+                            "https://localhost:5214",   // HTTPS вариант
+                            "http://localhost",         // WPF может использовать
+                            "https://localhost",        // HTTPS для WPF
+                            "http://127.0.0.1:5000",   // Для тестов
+                            "https://127.0.0.1:5001")  // Для тестов
                            .AllowAnyMethod()
-                           .AllowAnyHeader();
+                           .AllowAnyHeader()
+                           .AllowCredentials()
+                           .SetIsOriginAllowed(_ => true); // Разрешаем любые origin для разработки
                 });
             });
 
@@ -77,12 +96,28 @@ namespace BattleShip.Server
             }
 
             app.UseHttpsRedirection();
+
+            // 🔥 ВАЖНО: Сначала UseCors
             app.UseCors("AllowAll");
+
+            // 🔥 ДОБАВЛЯЕМ: UseRouting перед UseAuthorization
+            app.UseRouting();
+
             app.UseAuthorization();
 
-            app.MapControllers();
-            app.MapHub<ChatHub>("/chatHub");
-            app.MapHub<GameHub>("/gameHub");
+            // 🔥 ИЗМЕНЯЕМ: Используем UseEndpoints для правильной маршрутизации
+            app.UseEndpoints(endpoints =>
+            {
+                endpoints.MapControllers();
+
+                // 🔥 ВАЖНО: Сначала MapHub для ChatHub, потом для GameHub
+                endpoints.MapHub<ChatHub>("/chatHub");
+                endpoints.MapHub<GameHub>("/gameHub");
+
+                // Альтернативные пути для SignalR (для совместимости)
+                endpoints.MapHub<ChatHub>("/hubs/chat");
+                endpoints.MapHub<GameHub>("/hubs/game");
+            });
 
             // Эндпоинт для очистки базы (только для разработки)
             if (app.Environment.IsDevelopment())
@@ -130,7 +165,12 @@ namespace BattleShip.Server
             Console.WriteLine("🚀 BattleShip Server запущен!");
             Console.WriteLine($"📊 База данных: {FirebaseConfig.DatabaseUrl}");
             Console.WriteLine("📡 Swagger доступен по: /swagger");
-            Console.WriteLine("💬 SignalR hubs: /chatHub, /gameHub");
+            Console.WriteLine("💬 SignalR hubs:");
+            Console.WriteLine("   - /chatHub");
+            Console.WriteLine("   - /gameHub");
+            Console.WriteLine("   - /hubs/chat (альтернатива)");
+            Console.WriteLine("   - /hubs/game (альтернатива)");
+            Console.WriteLine($"🌐 URL приложения: {app.Urls.FirstOrDefault()}");
 
             app.Run();
         }

@@ -41,6 +41,7 @@ namespace BattleShip.Client
         Task<GameStateMessage> GetUpdatedGameStateAsync();
         // Чат
         Task SendChatMessageAsync(string message);
+        Task<List<ChatHistoryItem>> GetChatHistoryAsync();
         // Удаляем дублирующее событие OnChatMessageReceived
 
         // Статистика
@@ -48,6 +49,14 @@ namespace BattleShip.Client
         void SetShipsCallback(Func<List<ShipData>> getShipsCallback);
         Task<PlayerStats> GetPlayerStatsAsync();
 
+        public class ChatHistoryItem
+        {
+            public string SenderName { get; set; }
+            public string Message { get; set; }
+            public DateTime Timestamp { get; set; }
+            public bool IsSystem { get; set; }
+            public bool IsOwn { get; set; }
+        }
         public class ChatMessage
         {
             public string Sender { get; set; }

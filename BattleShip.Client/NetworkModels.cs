@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Text.Json;
 using System.Text.Json.Serialization;
 
 namespace BattleShip.Client
@@ -196,17 +197,16 @@ namespace BattleShip.Client
     }
 
     // Сообщение чата
-    public class ChatMessage
+    public class ClientChatMessage
     {
         [JsonPropertyName("sender")]
         public string Sender { get; set; }
-        
+
         [JsonPropertyName("text")]
         public string Text { get; set; }
-        
+
         [JsonPropertyName("isSystem")]
         public bool IsSystem { get; set; }
-        
     }
 
     // Модели для нового сервера
@@ -335,15 +335,55 @@ namespace BattleShip.Client
 
     public class BoardCell
     {
+        [JsonPropertyName("x")]
         public int X { get; set; }
+
+        [JsonPropertyName("y")]
         public int Y { get; set; }
+
+        [JsonPropertyName("hasShip")]
         public bool HasShip { get; set; }
+
+        [JsonPropertyName("wasShot")]
         public bool WasShot { get; set; }
 
         [JsonPropertyName("status")]
-        public string Status { get; set; } // Будет "0", "2", "3", "4"
+        [JsonConverter(typeof(StatusConverter))] // Добавьте конвертер
+        public string Status { get; set; }
 
+        [JsonPropertyName("isSunk")]
         public bool IsSunk { get; set; }
+    }
+
+    // Конвертер для статуса
+    public class StatusConverter : JsonConverter<string>
+    {
+        public override string Read(ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options)
+        {
+            if (reader.TokenType == JsonTokenType.Number)
+            {
+                var number = reader.GetInt32();
+                return number switch
+                {
+                    0 => "Empty",
+                    2 => "Hit",
+                    3 => "Miss",
+                    4 => "Sunk",
+                    _ => "Empty"
+                };
+            }
+            else if (reader.TokenType == JsonTokenType.String)
+            {
+                return reader.GetString();
+            }
+
+            return "Empty";
+        }
+
+        public override void Write(Utf8JsonWriter writer, string value, JsonSerializerOptions options)
+        {
+            writer.WriteStringValue(value);
+        }
     }
 
     public class BoardShip

@@ -6,67 +6,129 @@ namespace BattleShip.Server.Hubs
 {
     public class ChatHub : Hub
     {
-        // Храним связь ConnectionId -> GameId
-        private static readonly ConcurrentDictionary<string, string> _connectionToGame = new();
-        // Храним связь ConnectionId -> PlayerId
-        private static readonly ConcurrentDictionary<string, string> _connectionToPlayer = new();
+        private static readonly ConcurrentDictionary<string, (string gameId, string playerId, string playerName)>
+            _connections = new();
+
+        // Добавляем логгер для отладки
+        private readonly ILogger<ChatHub> _logger;
+
+        public ChatHub(ILogger<ChatHub> logger)
+        {
+            _logger = logger;
+        }
 
         public override async Task OnConnectedAsync()
         {
-            Console.WriteLine($"🔗 ChatHub: Подключен {Context.ConnectionId}");
+            _logger.LogInformation($"🔗 ChatHub: Подключен {Context.ConnectionId}");
             await base.OnConnectedAsync();
         }
 
-        public async Task JoinGameChat(string gameId, string playerId)
+        // Улучшенный метод подключения к чату игры
+        public async Task JoinGameChat(string gameId, string playerId, string playerName)
         {
-            Console.WriteLine($"💬 Игрок {playerId} присоединяется к чату игры {gameId}");
+            try
+            {
+                _logger.LogInformation($"💬 Игрок {playerName} ({playerId}) присоединяется к чату игры {gameId}");
 
-            // Сохраняем связь
-            _connectionToGame[Context.ConnectionId] = gameId;
-            _connectionToPlayer[Context.ConnectionId] = playerId;
+                // Сохраняем информацию о подключении
+                _connections[Context.ConnectionId] = (gameId, playerId, playerName);
 
-            // Добавляем в группу игры
-            await Groups.AddToGroupAsync(Context.ConnectionId, gameId);
+                // Добавляем в группу игры
+                await Groups.AddToGroupAsync(Context.ConnectionId, gameId);
 
-            // Отправляем системное сообщение
-            await Clients.Group(gameId).SendAsync("ReceiveSystemMessage",
-                $"{playerId} присоединился к чату");
+                // Отправляем подтверждение клиенту
+                await Clients.Caller.SendAsync("JoinedChat", gameId);
+
+                // Отправляем системное сообщение всем в игре
+                await Clients.Group(gameId).SendAsync("ReceiveSystemMessage",
+                    $"{playerName} присоединился к чату");
+
+                _logger.LogInformation($"✅ Игрок {playerName} успешно присоединился к чату игры {gameId}");
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, $"❌ Ошибка при присоединении к чату игры {gameId}");
+                throw;
+            }
         }
 
-        public async Task SendMessage(string message)
+        // Метод отправки сообщения
+        public async Task SendMessageToGame(string gameId, string message)
         {
-            if (!_connectionToGame.TryGetValue(Context.ConnectionId, out var gameId) ||
-                !_connectionToPlayer.TryGetValue(Context.ConnectionId, out var playerId))
+            try
             {
-                Console.WriteLine("❌ Не удалось найти игру/игрока для сообщения");
-                return;
+                if (!_connections.TryGetValue(Context.ConnectionId, out var connectionInfo))
+                {
+                    _logger.LogWarning($"⚠️ Неизвестное подключение: {Context.ConnectionId}");
+                    return;
+                }
+
+                var (storedGameId, playerId, playerName) = connectionInfo;
+
+                // Проверяем, что игрок в нужной игре
+                if (storedGameId != gameId)
+                {
+                    _logger.LogWarning($"⚠️ Игрок {playerName} пытается отправить сообщение не в свою игру");
+                    return;
+                }
+
+                _logger.LogInformation($"💬 Игра {gameId}: {playerName}: {message}");
+
+                // Отправляем сообщение всем участникам игры
+                await Clients.Group(gameId).SendAsync("ReceiveMessage",
+                    new
+                    {
+                        PlayerId = playerId,
+                        PlayerName = playerName,
+                        Message = message,
+                        Timestamp = DateTime.UtcNow
+                    });
             }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, $"❌ Ошибка отправки сообщения в игру {gameId}");
+            }
+        }
 
-            Console.WriteLine($"💬 Игра {gameId}: {playerId}: {message}");
-
-            // Отправляем сообщение всем в группе (всем игрокам этой игры)
-            await Clients.Group(gameId).SendAsync("ReceiveMessage", playerId, message);
+        // Метод отправки системного сообщения
+        public async Task SendSystemMessage(string gameId, string message)
+        {
+            await Clients.Group(gameId).SendAsync("ReceiveSystemMessage", message);
         }
 
         public override async Task OnDisconnectedAsync(Exception? exception)
         {
-            Console.WriteLine($"🔗 ChatHub: Отключен {Context.ConnectionId}");
-
-            // Удаляем из группы при отключении
-            if (_connectionToGame.TryRemove(Context.ConnectionId, out var gameId))
+            try
             {
-                if (_connectionToPlayer.TryRemove(Context.ConnectionId, out var playerId))
+                _logger.LogInformation($"🔗 ChatHub: Отключен {Context.ConnectionId}");
+
+                // Получаем информацию об отключающемся игроке
+                if (_connections.TryRemove(Context.ConnectionId, out var connectionInfo))
                 {
+                    var (gameId, _, playerName) = connectionInfo;
+
+                    // Удаляем из группы
+                    await Groups.RemoveFromGroupAsync(Context.ConnectionId, gameId);
+
                     // Уведомляем других игроков об отключении
                     await Clients.Group(gameId).SendAsync("ReceiveSystemMessage",
-                        $"{playerId} покинул чат");
+                        $"{playerName} покинул чат");
                 }
-
-                // Удаляем из группы
-                await Groups.RemoveFromGroupAsync(Context.ConnectionId, gameId);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "❌ Ошибка при отключении от чата");
             }
 
             await base.OnDisconnectedAsync(exception);
+        }
+
+        // Метод для проверки подключения
+        public async Task<bool> IsConnectedToGame(string gameId, string playerId)
+        {
+            var connection = _connections.Values.FirstOrDefault(c =>
+                c.gameId == gameId && c.playerId == playerId);
+            return connection != default;
         }
     }
 }

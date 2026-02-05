@@ -140,7 +140,7 @@ namespace BattleShip.Client
             _messages.Clear();
         }
         
-        private void ScrollToBottom()
+        public void ScrollToBottom()
         {
             if (_messages.Count > 0)
             {
@@ -302,6 +302,16 @@ namespace BattleShip.Client
             base.OnRenderSizeChanged(sizeInfo);
             // При изменении размера ограничиваем положение чата
             ConstrainToParentBounds();
+        }
+
+        public void FocusInput()
+        {
+            // Даем фокус полю ввода
+            Dispatcher.BeginInvoke(new Action(() =>
+            {
+                MessageInput.Focus();
+                Keyboard.Focus(MessageInput);
+            }), System.Windows.Threading.DispatcherPriority.Render);
         }
     }
     

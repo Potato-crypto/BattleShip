@@ -7,6 +7,7 @@ using System.Text.Json;
 using System.Threading.Tasks;
 using System.Timers;  
 using BattleShip.Core.Models;
+using Microsoft.AspNetCore.SignalR.Client;
 
 namespace BattleShip.Client
 {
@@ -45,6 +46,11 @@ namespace BattleShip.Client
             PropertyNameCaseInsensitive = true,
             PropertyNamingPolicy = JsonNamingPolicy.CamelCase
         };
+
+
+        private HubConnection _chatHubConnection;
+        private HubConnection _gameHubConnection;
+        private bool _isSignalRConnected = false;
 
         public ServerNetworkManager()
         {
@@ -89,6 +95,9 @@ namespace BattleShip.Client
 
                 Console.WriteLine($"✅ Сессия создана: SessionId={_sessionId}, PlayerId={PlayerId}");
 
+                // Подключаемся к SignalR хабам
+                await ConnectToSignalR();
+
                 // Запускаем heartbeat
                 StartHeartbeat();
 
@@ -113,6 +122,83 @@ namespace BattleShip.Client
             }
         }
 
+        private async Task ConnectToSignalR()
+        {
+            try
+            {
+                Console.WriteLine("🔗 Подключение к SignalR хабам...");
+
+                // Создаем подключение к ChatHub
+                _chatHubConnection = new HubConnectionBuilder()
+                    .WithUrl($"{BaseUrl}/chathub")
+                    .WithAutomaticReconnect(new[] { TimeSpan.Zero, TimeSpan.FromSeconds(2), TimeSpan.FromSeconds(5), TimeSpan.FromSeconds(10) })
+                    .Build();
+
+                // Подписываемся на события чата
+                _chatHubConnection.On<string>("ReceiveSystemMessage",
+                    (message) =>
+                    {
+                        Console.WriteLine($"💬 [Система] {message}");
+                        OnChatMessage?.Invoke(new INetworkService.ChatMessage
+                        {
+                            Sender = "[Система]",
+                            Message = message,
+                            IsSystem = true
+                        });
+                    });
+
+                _chatHubConnection.On<string, string>("ReceiveMessage",
+                    (senderId, message) =>
+                    {
+                        Console.WriteLine($"💬 {senderId}: {message}");
+                        OnChatMessage?.Invoke(new INetworkService.ChatMessage
+                        {
+                            Sender = senderId,
+                            Message = message,
+                            IsSystem = false
+                        });
+                    });
+
+                // Создаем подключение к GameHub
+                _gameHubConnection = new HubConnectionBuilder()
+                    .WithUrl($"{BaseUrl}/gamehub")
+                    .WithAutomaticReconnect()
+                    .Build();
+
+                // Подписываемся на события игры
+                _gameHubConnection.On<string>("OpponentDisconnected",
+                    (message) =>
+                    {
+                        Console.WriteLine($"⚠️ {message}");
+                        OnOpponentDisconnected?.Invoke(message);
+                    });
+
+                _gameHubConnection.On<string>("OpponentReconnected",
+                    (message) =>
+                    {
+                        Console.WriteLine($"✅ {message}");
+                        OnMessageReceived?.Invoke(JsonSerializer.Serialize(new
+                        {
+                            Type = "opponent_reconnected",
+                            Message = message,
+                            Timestamp = DateTime.Now
+                        }));
+                    });
+
+                // Начинаем подключение
+                await _chatHubConnection.StartAsync();
+                await _gameHubConnection.StartAsync();
+
+                _isSignalRConnected = true;
+                Console.WriteLine("✅ SignalR подключен");
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"❌ Ошибка подключения SignalR: {ex.Message}");
+                _isSignalRConnected = false;
+            }
+        }
+
         public async Task DisconnectAsync()
         {
             try
@@ -121,6 +207,20 @@ namespace BattleShip.Client
                 {
                     await LeaveGameAsync();
                 }
+
+                if (_chatHubConnection != null)
+                {
+                    await _chatHubConnection.StopAsync();
+                    await _chatHubConnection.DisposeAsync();
+                }
+
+                if (_gameHubConnection != null)
+                {
+                    await _gameHubConnection.StopAsync();
+                    await _gameHubConnection.DisposeAsync();
+                }
+
+                _isSignalRConnected = false;
 
                 StopAllTimers();
                 IsConnected = false;
@@ -311,6 +411,12 @@ namespace BattleShip.Client
 
                         Console.WriteLine($"✅ Противник найден! Игра: {GameId}");
 
+                        // Присоединяемся к чату игры через SignalR
+                        await JoinGameChat();
+
+                        // Присоединяемся к GameHub
+                        await JoinGameHub();
+
                         StartGameStatePolling();
 
                         OnGameStarted?.Invoke(new GameStartMessage
@@ -345,6 +451,39 @@ namespace BattleShip.Client
                 {
                     Console.WriteLine($"⚠️ Ошибка проверки лобби: {ex.Message}");
                     await Task.Delay(2000);
+                }
+            }
+        }
+
+        private async Task JoinGameChat()
+        {
+            if (_chatHubConnection?.State == HubConnectionState.Connected && !string.IsNullOrEmpty(GameId))
+            {
+                try
+                {
+                    
+                    await _chatHubConnection.InvokeAsync("JoinGameChat", GameId, PlayerId, _playerName);
+                    Console.WriteLine($"💬 Присоединились к чату игры {GameId} как {_playerName}");
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"⚠️ Ошибка присоединения к чату: {ex.Message}");
+                }
+            }
+        }
+
+        private async Task JoinGameHub()
+        {
+            if (_gameHubConnection?.State == HubConnectionState.Connected && !string.IsNullOrEmpty(GameId))
+            {
+                try
+                {
+                    await _gameHubConnection.InvokeAsync("JoinGame", GameId, PlayerId);
+                    Console.WriteLine($"🎮 Присоединились к GameHub игры {GameId}");
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"⚠️ Ошибка присоединения к GameHub: {ex.Message}");
                 }
             }
         }
@@ -632,6 +771,37 @@ namespace BattleShip.Client
 
         #region Опрос состояния игры
 
+
+        public async Task<bool> SurrenderAsync(string playerId)
+        {
+            try
+            {
+                if (!IsInGame || string.IsNullOrEmpty(GameId))
+                    return false;
+
+                var request = new SurrenderRequest { PlayerId = playerId };
+
+                var response = await _httpClient.PostAsJsonAsync(
+                    $"/api/game/{GameId}/surrender",
+                    request,
+                    _jsonOptions);
+
+                if (response.IsSuccessStatusCode)
+                {
+                    Console.WriteLine($"🏳️ Игрок {playerId} сдался в игре {GameId}");
+                    IsInGame = false;
+                    GameId = null;
+                    return true;
+                }
+
+                return false;
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"❌ Ошибка при сдаче: {ex.Message}");
+                return false;
+            }
+        }
         private void StartGameStatePolling()
         {
             StopGameStatePolling();
@@ -651,6 +821,28 @@ namespace BattleShip.Client
                 _gameStatePollTimer.Stop();
                 _gameStatePollTimer.Dispose();
                 _gameStatePollTimer = null;
+            }
+        }
+
+
+        public async Task<BoardResponse> GetBoardState()
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(GameId) || string.IsNullOrEmpty(PlayerId))
+                    return null;
+
+                var response = await _httpClient.GetAsync($"/api/Game/{GameId}/board/{PlayerId}");
+
+                if (!response.IsSuccessStatusCode)
+                    return null;
+
+                return await response.Content.ReadFromJsonAsync<BoardResponse>(_jsonOptions);
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"❌ Ошибка получения состояния доски: {ex.Message}");
+                return null;
             }
         }
 
@@ -887,6 +1079,7 @@ namespace BattleShip.Client
 
         #region Чат
 
+        // На клиенте добавьте ссылку на BattleShip.Core
         public async Task SendChatMessageAsync(string message)
         {
             try
@@ -894,28 +1087,119 @@ namespace BattleShip.Client
                 if (string.IsNullOrWhiteSpace(message) || string.IsNullOrEmpty(GameId))
                     return;
 
-                // Простая реализация через сохранение в Firebase
-                var chatMessage = new
+                if (_chatHubConnection?.State == HubConnectionState.Connected)
                 {
-                    GameId,
-                    PlayerId,
-                    PlayerName = _playerName,
-                    Message = message,
-                    Timestamp = DateTime.UtcNow,
-                    IsSystemMessage = false
-                };
-
-                var response = await _httpClient.PostAsJsonAsync($"/api/chat/{GameId}/save", chatMessage, _jsonOptions);
-
-                if (response.IsSuccessStatusCode)
+                    await _chatHubConnection.InvokeAsync("SendMessage", message);
+                    Console.WriteLine($"💬 Сообщение отправлено через SignalR: {message}");
+                }
+                else
                 {
-                    Console.WriteLine($"💬 Сообщение отправлено: {message}");
+                    Console.WriteLine($"⚠️ SignalR не подключен, отправляем через REST API...");
+
+                    var chatMessage = new BattleShip.Core.Models.ChatMessage
+                    {
+                        GameId = GameId,
+                        PlayerId = PlayerId,
+                        PlayerName = _playerName,
+                        Message = message,
+                        Timestamp = DateTime.UtcNow,
+                        IsSystemMessage = false
+                    };
+
+                    var response = await _httpClient.PostAsJsonAsync($"/api/chat/send", chatMessage, _jsonOptions);
+
+                    if (response.IsSuccessStatusCode)
+                    {
+                        Console.WriteLine($"💬 Сообщение отправлено через REST API: {message}");
+                    }
+                    else
+                    {
+                        Console.WriteLine($"❌ Ошибка отправки сообщения: {response.StatusCode}");
+                    }
                 }
             }
             catch (Exception ex)
             {
                 Console.WriteLine($"⚠️ Ошибка отправки сообщения: {ex.Message}");
             }
+        }
+
+        public async Task<List<INetworkService.ChatHistoryItem>> GetChatHistoryAsync()
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(GameId))
+                    return new List<INetworkService.ChatHistoryItem>();
+
+                Console.WriteLine($"📜 Загружаем историю чата для игры {GameId}...");
+
+                // 🔥 МЕТОД 1: Через REST API (ChatController)
+                var response = await _httpClient.GetAsync($"/api/chat/{GameId}/messages");
+
+                if (!response.IsSuccessStatusCode)
+                {
+                    Console.WriteLine($"⚠️ Не удалось получить историю чата: {response.StatusCode}");
+                    return new List<INetworkService.ChatHistoryItem>();
+                }
+
+                var result = await response.Content.ReadFromJsonAsync<ChatHistoryResponse>(_jsonOptions);
+
+                if (result?.Success != true || result.Messages == null)
+                {
+                    Console.WriteLine("⚠️ Пустая история чата");
+                    return new List<INetworkService.ChatHistoryItem>();
+                }
+
+                Console.WriteLine($"📜 Загружено {result.Messages.Count} сообщений");
+
+                // Преобразуем сообщения сервера в клиентскую модель
+                var chatHistory = new List<INetworkService.ChatHistoryItem>();
+
+                foreach (var serverMessage in result.Messages)
+                {
+                    // Определяем, наше ли это сообщение
+                    bool isOwn = serverMessage.PlayerId == PlayerId;
+                    string senderName;
+
+                    if (serverMessage.IsSystemMessage)
+                    {
+                        senderName = "Система";
+                    }
+                    else if (isOwn)
+                    {
+                        senderName = "Вы";
+                    }
+                    else
+                    {
+                        // Если это сообщение оппонента - используем его имя
+                        senderName = !string.IsNullOrEmpty(serverMessage.PlayerName)
+                            ? serverMessage.PlayerName
+                            : "Соперник";
+                    }
+
+                    chatHistory.Add(new INetworkService.ChatHistoryItem
+                    {
+                        SenderName = senderName,
+                        Message = serverMessage.Message,
+                        Timestamp = serverMessage.Timestamp,
+                        IsSystem = serverMessage.IsSystemMessage,
+                        IsOwn = isOwn
+                    });
+                }
+
+                return chatHistory;
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"❌ Ошибка получения истории чата: {ex.Message}");
+                return new List<INetworkService.ChatHistoryItem>();
+            }
+        }
+
+        private class ChatHistoryResponse
+        {
+            public bool Success { get; set; }
+            public List<BattleShip.Core.Models.ChatMessage> Messages { get; set; }
         }
 
         #endregion

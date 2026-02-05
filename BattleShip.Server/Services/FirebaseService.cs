@@ -737,6 +737,44 @@ namespace BattleShip.Server.Services
             }
         }
 
+        private FirebaseClient GetDatabase()
+        {
+            return _firebaseClient;
+        }
+
+        public async Task SaveChatMessageAsync(ChatMessage message)
+        {
+            try
+            {
+                var db = GetDatabase();
+                var messageRef = db.Child("chatMessages").Child(message.GameId).Child(message.Id);
+                await messageRef.PutAsync(message);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "❌ Ошибка сохранения сообщения чата");
+            }
+        }
+
+        public async Task<List<ChatMessage>> GetChatMessagesAsync(string gameId, int limit = 50)
+        {
+            try
+            {
+                var db = GetDatabase();
+                var messagesRef = db.Child("chatMessages").Child(gameId)
+                    .OrderByKey()
+                    .LimitToLast(limit);
+
+                var snapshot = await messagesRef.OnceAsync<ChatMessage>();
+                return snapshot.Select(x => x.Object).OrderBy(m => m.Timestamp).ToList();
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "❌ Ошибка получения сообщений чата");
+                return new List<ChatMessage>();
+            }
+        }
+
         // Обновляем игру целиком (со всеми досками)
         public async Task UpdateFullGameAsync(Game game)
         {
